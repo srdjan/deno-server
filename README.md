@@ -1,28 +1,26 @@
-# Deno HTTP Server
+# **Deno Effection HTTP Server with Dynamic Routing and Middleware**
 
-A lightweight, functional-style HTTP server built with Deno. This server supports static file serving, dynamic routing, middleware, and more, with minimal external dependencies.
-
----
-
-## Features
-
-- **Static File Serving**: Serve static files (HTML, CSS, JS, images) from specified directories.
-- **Dynamic Routing**: Define custom routes with handlers for different HTTP methods.
-- **Middleware Support**: Add middleware for logging, security headers, and more.
-- **Environment Configuration**: Configure the server using environment variables.
-- **Graceful Shutdown**: Handle shutdown signals (`SIGINT`, `SIGTERM`) gracefully.
-- **File Caching**: Cache frequently accessed files for improved performance.
-- **Custom Error Pages**: Serve custom `404.html` for missing routes or files.
+A lightweight, functional-style HTTP server built with **Deno** and **Effection**. This server supports dynamic routing, static file serving, middleware, and structured concurrency.
 
 ---
 
-## Getting Started
+## **Features**
 
-### Prerequisites
+- **Dynamic Routing**: Define routes with `path`, `method`, and `handler`.
+- **Static File Serving**: Serve static files (HTML, CSS, JS, images) from the `public` directory.
+- **Middleware**: Add middleware for logging and security headers.
+- **Structured Concurrency**: Use Effection for managing asynchronous workflows and graceful shutdown.
+- **Graceful Shutdown**: Handle `SIGINT` and `SIGTERM` signals for clean server shutdown.
+
+---
+
+## **Getting Started**
+
+### **Prerequisites**
 
 - [Deno](https://deno.land/) installed on your machine.
 
-### Installation
+### **Installation**
 
 1. Clone the repository:
 
@@ -39,52 +37,34 @@ A lightweight, functional-style HTTP server built with Deno. This server support
 
 3. Add static files (e.g., `index.html`, `style.css`) to the `public` directory.
 
-### Running the Server
+### **Running the Server**
 
 1. Start the server:
 
    ```bash
-   deno run --allow-net --allow-read --allow-env server.ts
+   deno run --allow-net --allow-read server.ts
    ```
 
 2. The server will start on `http://localhost:8000`.
 
-### Environment Variables
-
-You can configure the server using the following environment variables:
-
-- `PORT`: The port to run the server on (default: `8000`).
-- `STATIC_DIRS`: Comma-separated list of directories to serve static files from (default: `./public`).
-- `LOG_LEVEL`: Logging level (`info` or `debug`, default: `info`).
-
-Example:
-
-```bash
-export PORT=8080
-export STATIC_DIRS="./public,./assets"
-export LOG_LEVEL=debug
-deno run --allow-net --allow-read --allow-env server.ts
-```
-
 ---
 
-## Project Structure
+## **Project Structure**
 
 ```
 .
 ├── server.ts            # Main server script
+├── deps.ts              # Dependency management
 ├── public/              # Directory for static files
 │   ├── index.html       # Example HTML file
 │   ├── style.css        # Example CSS file
 │   └── 404.html         # Custom 404 error page
-├── assets/              # Additional static files (optional)
-│   └── image.png        # Example image
 └── README.md            # This file
 ```
 
 ---
 
-## Adding Routes
+## **Adding Routes**
 
 To add a new route, update the `routes` array in `server.ts`:
 
@@ -103,60 +83,55 @@ const routes: Route[] = [
   {
     path: "/static",
     method: "GET",
-    handler: serveStatic,
+    handler: (req) => {
+      const url = new URL(req.url);
+      const filePath = `./public${url.pathname.substring("/static".length)}`;
+      return serveStatic(filePath);
+    },
   },
   // Add new routes here
   {
     path: "/api/data",
     method: "GET",
-    handler: async () => {
-      const data = { message: "Hello from the API!" };
-      return new Response(JSON.stringify(data), {
-        headers: { "Content-Type": "application/json" },
-      });
-    },
+    handler: () => new Response(JSON.stringify({ message: "Hello from the API!" }), {
+      headers: { "Content-Type": "application/json" },
+    }),
   },
 ];
 ```
 
 ---
 
-## Middleware
+## **Middleware**
 
-Middleware functions can be added to the `applyMiddleware` function in `server.ts`:
+Middleware functions can be added to the `handler` in `server.ts`:
 
 ```typescript
-const server = serve(
-  applyMiddleware(handleRequest, loggingMiddleware, securityHeadersMiddleware),
-  { port: PORT }
-);
+const handler = securityHeadersMiddleware(loggingMiddleware(handleRequest));
 ```
 
-### Example Middleware
+### **Example Middleware**
 
 - **Logging Middleware**: Logs request details (method, URL, status, duration).
 - **Security Headers Middleware**: Adds security headers like `Content-Security-Policy` and `X-XSS-Protection`.
 
 ---
 
-## Custom Error Pages
+## **Static File Serving**
 
-To serve a custom `404.html` page, place the file in the `public` directory. The server will automatically serve it for missing routes or files.
+Static files are served from the `public` directory under the `/static` route. For example:
 
----
-
-## Performance Optimization
-
-- **File Caching**: Frequently accessed files are cached in memory to reduce disk I/O.
-- **Streaming**: For large files, consider using `Deno.open` and streaming the response.
+- `http://localhost:8000/static/style.css` serves `./public/style.css`.
 
 ---
 
-## Testing
+## **Graceful Shutdown**
 
-To test the server, you can use tools like [curl](https://curl.se/) or [Postman](https://www.postman.com/).
+The server handles `SIGINT` and `SIGTERM` signals for graceful shutdown. Press `Ctrl+C` to stop the server.
 
-### Example Requests
+---
+
+## **Example Requests**
 
 - **Homepage**:
 
@@ -176,6 +151,12 @@ To test the server, you can use tools like [curl](https://curl.se/) or [Postman]
   curl http://localhost:8000/static/style.css
   ```
 
+- **API Endpoint**:
+
+  ```bash
+  curl http://localhost:8000/api/data
+  ```
+
 - **Custom 404 Page**:
 
   ```bash
@@ -184,22 +165,35 @@ To test the server, you can use tools like [curl](https://curl.se/) or [Postman]
 
 ---
 
-## Contributing
+## **Next Steps**
+
+1. **Streaming**:
+   - Implement streaming for large files using `Deno.open`.
+
+2. **Testing**:
+   - Write unit tests for the server using Effection's testing utilities.
+
+3. **Configuration**:
+   - Use environment variables or a configuration file to customize the server's behavior.
+
+---
+
+## **Contributing**
 
 Contributions are welcome! Please open an issue or submit a pull request.
 
 ---
 
-## License
+## **License**
 
 This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.
 
 ---
 
-## Acknowledgments
+## **Acknowledgments**
 
-- Built with [Deno](https://deno.land/).
+- Built with [Deno](https://deno.land/) and [Effection](https://frontside.com/effection/).
 - Inspired by functional programming principles.
 
 ---
-
+ 🚀
