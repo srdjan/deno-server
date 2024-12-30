@@ -1,4 +1,4 @@
-import { Route, serveStatic, start } from "./server.ts";
+import { Route, serveStatic, start } from "../server/server.ts";
 
 const routes: Route[] = [
   {

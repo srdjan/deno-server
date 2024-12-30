@@ -1,4 +1,4 @@
-import { main, spawn, useAbortSignal } from "./deps.ts";
+import { main, spawn, useAbortSignal } from "../deps.ts";
 
 export type RequestHandler = (req: Request) => Response | Promise<Response>;
 
@@ -78,6 +78,17 @@ const handleRequest: RequestHandler = async (req) => {
   const path = url.pathname;
   const method = req.method;
 
+  // Check if the path corresponds to a file in the public directory
+  const filePath = `./public${path}`;
+  try {
+    const stat = await Deno.stat(filePath);
+    if (stat.isFile) {
+      return serveStatic(filePath);
+    }
+  } catch {
+    return new Response("File Not Found", { status: 404 });
+  }
+
   // Find a matching route
   const route = routes.find(
     (r) => path === r.path && r.method === method
@@ -86,7 +97,7 @@ const handleRequest: RequestHandler = async (req) => {
   if (route) {
     return await route.handler(req);
   } else {
-    return new Response("Not Found", { status: 404 });
+    return new Response("Route Not Found", { status: 404 });
   }
 };
 
