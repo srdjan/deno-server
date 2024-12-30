@@ -1,15 +1,16 @@
-import { main, spawn, useAbortSignal } from "../deps.ts";
+import { main, spawn, Operation, createChannel, Stream, Context, useAbortSignal, Task } from "../deps.ts";
 import * as path from "https://deno.land/std/path/mod.ts";
 
 // Configuration
 const CONFIG = {
   port: parseInt(Deno.env.get("PORT") || "8000"),
   env: Deno.env.get("DENO_ENV") || "development",
-  publicDir: Deno.env.get("PUBLIC_DIR") || "./public"
+  publicDir: Deno.env.get("PUBLIC_DIR") || "./public",
+  shutdownTimeout: parseInt(Deno.env.get("SHUTDOWN_TIMEOUT") || "5000")
 };
 
 // Types
-export type RequestHandler = (req: Request) => Response | Promise<Response>;
+export type RequestHandler = (req: Request, context: Context) => Response | Promise<Response>;
 
 export type Route = {
   path: string | RegExp;
@@ -31,13 +32,40 @@ const MIME_TYPES = new Map([
   ['svg', 'image/svg+xml']
 ]);
 
-// Middleware for structured logging
-const loggingMiddleware = (handler: RequestHandler): RequestHandler => async (req) => {
+// Create a channel for active requests tracking
+const createRequestTracker = () => {
+  const activeRequests = new Set<Promise<void>>();
+  const channel = createChannel<{ type: 'start' | 'end', promise: Promise<void> }>();
+
+  return {
+    channel,
+    track: async function* (request: Promise<void>) {
+      activeRequests.add(request);
+      yield channel.send({ type: 'start', promise: request });
+
+      try {
+        await request;
+      } finally {
+        activeRequests.delete(request);
+        yield channel.send({ type: 'end', promise: request });
+      }
+    },
+    * waitForCompletion() {
+      const promises = Array.from(activeRequests);
+      if (promises.length > 0) {
+        yield Promise.all(promises);
+      }
+    }
+  };
+};
+
+// Middleware for structured logging with Effection context
+const loggingMiddleware = (handler: RequestHandler): RequestHandler => async (req, context) => {
   const requestId = crypto.randomUUID();
   const start = Date.now();
 
   try {
-    const res = await handler(req);
+    const res = await handler(req, context);
     const duration = Date.now() - start;
 
     console.log(JSON.stringify({
@@ -62,11 +90,10 @@ const loggingMiddleware = (handler: RequestHandler): RequestHandler => async (re
 };
 
 // Middleware for security headers
-const securityHeadersMiddleware = (handler: RequestHandler): RequestHandler => async (req) => {
-  const res = await handler(req);
+const securityHeadersMiddleware = (handler: RequestHandler): RequestHandler => async (req, context) => {
+  const res = await handler(req, context);
   const newRes = new Response(res.body, res);
 
-  // More granular CSP
   newRes.headers.set(
     "Content-Security-Policy",
     "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline';"
@@ -79,20 +106,17 @@ const securityHeadersMiddleware = (handler: RequestHandler): RequestHandler => a
   return newRes;
 };
 
-// Helper function to determine MIME type
 const getContentType = (filePath: string): string => {
   const extension = filePath.split(".").pop()?.toLowerCase() || '';
   return MIME_TYPES.get(extension) || 'text/plain';
 };
 
-// Serve static files securely
-export const serveStatic = async (filePath: string): Promise<Response> => {
+// Serve static files securely using Effection context
+export const serveStatic = async (filePath: string, context: Context): Promise<Response> => {
   try {
-    // Normalize and validate path
     const normalizedPath = path.normalize(filePath).replace(/^(\.\.[\/\\])+/, '');
     const fullPath = path.join(CONFIG.publicDir, normalizedPath);
 
-    // Ensure the path is within public directory
     if (!fullPath.startsWith(path.resolve(CONFIG.publicDir))) {
       return new Response("Forbidden", { status: 403 });
     }
@@ -112,7 +136,6 @@ export const serveStatic = async (filePath: string): Promise<Response> => {
   }
 };
 
-// Route matching
 const matchRoute = (path: string, method: string): Route | undefined => {
   return routes.find(route => {
     if (typeof route.path === 'string') {
@@ -122,29 +145,27 @@ const matchRoute = (path: string, method: string): Route | undefined => {
   });
 };
 
-// Main request handler
-const handleRequest: RequestHandler = async (req) => {
+// Main request handler with Effection context
+const handleRequest = (context: Context): RequestHandler => async (req) => {
   try {
     const url = new URL(req.url);
     const path = url.pathname;
     const method = req.method;
 
-    // Check if the path corresponds to a file in the public directory
     const filePath = `${CONFIG.publicDir}${path}`;
     try {
       const stat = await Deno.stat(filePath);
       if (stat.isFile) {
-        return serveStatic(filePath);
+        return serveStatic(filePath, context);
       }
     } catch {
       // Continue to route matching if file not found
     }
 
-    // Find a matching route
     const route = matchRoute(path, method);
 
     if (route) {
-      return await route.handler(req);
+      return await route.handler(req, context);
     }
 
     return new Response("Route Not Found", { status: 404 });
@@ -157,7 +178,6 @@ const handleRequest: RequestHandler = async (req) => {
   }
 };
 
-// Compose middleware
 const composeMiddleware = (
   middlewares: ((handler: RequestHandler) => RequestHandler)[],
   handler: RequestHandler
@@ -165,47 +185,63 @@ const composeMiddleware = (
   return middlewares.reduce((acc, middleware) => middleware(acc), handler);
 };
 
-// Start the server using Deno.serve and Effection
-const startServer = async (port: number) => {
+// Enhanced server lifecycle management using Effection
+function* createServer(port: number): Operation<void> {
+  const requestTracker = createRequestTracker();
+  const context = yield* Context.create();
+
   const handler = composeMiddleware(
     [loggingMiddleware, securityHeadersMiddleware],
-    handleRequest
+    handleRequest(context)
   );
 
-  const server = Deno.serve({ port }, handler);
+  const server = Deno.serve({ port }, async (req) => {
+    const requestPromise = handler(req, context);
+    yield * requestTracker.track(requestPromise);
+    return requestPromise;
+  });
 
   console.log(`Server is running on http://localhost:${port}`);
 
-  // Use Effection's useAbortSignal to handle graceful shutdown
-  const abortSignal = useAbortSignal();
-  abortSignal.addEventListener("abort", async () => {
-    console.log("Shutting down gracefully...");
-    await server.shutdown();
-    console.log("Server has been shut down.");
-  });
+  try {
+    // Handle graceful shutdown
+    const shutdown = yield* Stream.race([
+      Stream.fromAbortSignal(useAbortSignal()),
+      Stream.fromEvent(Deno, "SIGINT"),
+      Stream.fromEvent(Deno, "SIGTERM")
+    ]);
 
-  // Wait for the server to close
-  await server.finished;
-};
+    console.log("Initiating graceful shutdown...");
 
-// Main function using Effection
-main(function* () {
-  yield* spawn(startServer(CONFIG.port));
+    // Stop accepting new connections
+    server.shutdown();
 
-  // Handle SIGINT and SIGTERM for graceful shutdown
-  const abortSignal = useAbortSignal();
-  Deno.addSignalListener("SIGINT", () => abortSignal.abort());
-  Deno.addSignalListener("SIGTERM", () => abortSignal.abort());
+    // Wait for existing requests to complete with timeout
+    yield* Task.timeout(CONFIG.shutdownTimeout, function* () {
+      yield* requestTracker.waitForCompletion();
+    });
 
-  console.log("Press Ctrl+C to stop the server.");
-});
+    console.log("Server has been shut down gracefully.");
+  } finally {
+    context.abort();
+  }
+}
 
 let routes: Route[] = [];
 
+// Start server with enhanced error handling
 export const start = (appRoutes: Route[]) => {
   if (!appRoutes || appRoutes.length === 0) {
     throw new Error("Routes must be provided.");
   }
   routes = appRoutes;
-  main();
+
+  main(function* () {
+    try {
+      yield* createServer(CONFIG.port);
+    } catch (error) {
+      console.error("Fatal server error:", error);
+      Deno.exit(1);
+    }
+  });
 };
