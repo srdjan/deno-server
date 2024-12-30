@@ -1,6 +1,6 @@
-import { Route, serveStatic } from "./server.ts";
+import { Route, serveStatic, start } from "./server.ts";
 
-export const routes: Route[] = [
+const routes: Route[] = [
   {
     path: "/",
     method: "GET",
@@ -21,3 +21,5 @@ export const routes: Route[] = [
     },
   },
 ];
+
+start(routes);

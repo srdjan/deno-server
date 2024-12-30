@@ -1,5 +1,4 @@
 import { main, spawn, useAbortSignal } from "./deps.ts";
-import { routes } from "./routes.ts";
 
 export type RequestHandler = (req: Request) => Response | Promise<Response>;
 
@@ -115,3 +114,9 @@ main(function* () {
 
   console.log("Press Ctrl+C to stop the server.");
 });
+
+let routes: Route[] = [];
+export const start = (appRoutes: Route[]) => {
+  routes = appRoutes;
+  main();
+}
