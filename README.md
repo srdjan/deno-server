@@ -187,6 +187,8 @@ This project is licensed under the MIT License. See the [LICENSE](LICENSE) file 
 
 ## **Acknowledgments**
 
+- Built by DeepSeek & Cloude Sonet.
+- Uses [Deno](https://deno.land/) and [Effection](https://frontside.com/effection/).
 - Built with [Deno](https://deno.land/) and [Effection](https://frontside.com/effection/).
 - Inspired by functional programming principles.
 
