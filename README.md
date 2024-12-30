@@ -1,17 +1,19 @@
-
 # **Deno HTTP Server with Static File Serving and Dynamic Routing**
 
-A lightweight, functional-style HTTP server built with **Deno** and **Effection**. This server supports static file serving, dynamic routing, middleware, and structured concurrency.
+A robust, functional-style HTTP server built with **Deno** and **Effection**. This server implements secure static file serving, dynamic routing with RegExp support, comprehensive middleware system, and advanced structured concurrency patterns.
 
 ---
 
 ## **Features**
 
-- **Static File Serving**: Serve static files (HTML, CSS, JS, images) from the `public` directory.
-- **Dynamic Routing**: Define routes with `path`, `method`, and `handler`.
-- **Middleware**: Add middleware for logging and security headers.
-- **Structured Concurrency**: Use Effection for managing asynchronous workflows and graceful shutdown.
-- **Graceful Shutdown**: Handle `SIGINT` and `SIGTERM` signals for clean server shutdown.
+- **Enhanced Static File Serving**: Secure static file serving with path traversal protection and MIME type caching
+- **Advanced Dynamic Routing**: Define routes with `path` (string or RegExp), `method`, and `handler`
+- **Comprehensive Middleware**: Built-in middleware for logging, security headers, and request tracking
+- **Advanced Structured Concurrency**: Leverages Effection for robust resource management and graceful shutdown
+- **Security Features**: Strong security defaults with CSP and other security headers
+- **Request Tracking**: Monitor and manage in-flight requests during shutdown
+- **Environment Configuration**: Flexible configuration through environment variables
+- **Structured Logging**: Detailed request logging with unique request IDs and timing
 
 ---
 
@@ -19,7 +21,8 @@ A lightweight, functional-style HTTP server built with **Deno** and **Effection*
 
 ### **Prerequisites**
 
-- [Deno](https://deno.land/) installed on your machine.
+- [Deno](https://deno.land/) 1.37 or higher installed on your machine
+- Understanding of TypeScript and async programming
 
 ### **Installation**
 
@@ -36,17 +39,24 @@ A lightweight, functional-style HTTP server built with **Deno** and **Effection*
    mkdir public
    ```
 
-3. Add static files (e.g., `index.html`, `styles.css`) to the `public` directory.
+3. Configure environment variables (optional):
+
+   ```bash
+   export PORT=8000
+   export DENO_ENV=development
+   export PUBLIC_DIR=./public
+   export SHUTDOWN_TIMEOUT=5000
+   ```
 
 ### **Running the Server**
 
 1. Start the server:
 
    ```bash
-   deno run --allow-net --allow-read routes.ts
+   deno run --allow-net --allow-read --allow-env routes.ts
    ```
 
-2. The server will start on `http://localhost:8000`.
+2. The server will start on `http://localhost:8000` (or configured PORT).
 
 ---
 
@@ -55,21 +65,21 @@ A lightweight, functional-style HTTP server built with **Deno** and **Effection*
 ```
 .
 ├── server/              # Server implementation
-│   ├── server.ts        # Main server script
+│   ├── server.ts        # Main server implementation
 │   └── deps.ts          # Dependency management
 ├── routes.ts            # Application routes
 ├── public/              # Directory for static files
 │   ├── index.html       # Example HTML file
 │   ├── styles.css       # Example CSS file
-│   └── 404.html         # Custom 404 error page
-└── README.md            # This file
+│   └── 404.html        # Custom 404 error page
+└── README.md           # This file
 ```
 
 ---
 
 ## **Defining Routes**
 
-The `routes.ts` file defines the routes and starts the server. Here’s an example:
+Routes now support RegExp patterns and include Effection context:
 
 ```typescript
 // routes.ts
@@ -79,20 +89,20 @@ const routes: Route[] = [
   {
     path: "/",
     method: "GET",
-    handler: () => new Response("Hello, World!", { status: 200 }),
+    handler: async (req, context) => new Response("Hello, World!", { status: 200 }),
   },
   {
-    path: "/about",
+    path: /^\/users\/(\d+)$/,  // RegExp pattern for dynamic routes
     method: "GET",
-    handler: () => new Response("About page", { status: 200 }),
+    handler: async (req, context) => new Response("User details", { status: 200 }),
   },
   {
     path: "/static",
     method: "GET",
-    handler: async (req) => {
+    handler: async (req, context) => {
       const url = new URL(req.url);
       const filePath = `./public${url.pathname.substring("/static".length)}`;
-      return await serveStatic(filePath);
+      return await serveStatic(filePath, context);
     },
   },
 ];
@@ -104,72 +114,122 @@ start(routes);
 
 ## **Middleware**
 
-Middleware functions are applied globally in the server implementation (`server.ts`). For example:
+The server now includes enhanced middleware capabilities:
 
 ```typescript
-const handler = composeMiddleware([loggingMiddleware, securityHeadersMiddleware], handleRequest);
+// Example custom middleware with context
+const customMiddleware = (handler: RequestHandler): RequestHandler => 
+  async (req, context) => {
+    const response = await handler(req, context);
+    // Middleware logic here
+    return response;
+  };
+
+// Built-in middleware includes:
+// - Logging middleware with request tracking
+// - Security headers middleware with configurable CSP
+// - Request tracking middleware for graceful shutdown
 ```
 
-### **Example Middleware**
+### **Security Headers**
 
-- **Logging Middleware**: Logs request details (method, URL, status, duration).
-- **Security Headers Middleware**: Adds security headers like `Content-Security-Policy` and `X-XSS-Protection`.
+Built-in security headers include:
+
+```typescript
+{
+  "Content-Security-Policy": "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline';",
+  "X-Content-Type-Options": "nosniff",
+  "X-Frame-Options": "DENY",
+  "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+  "X-XSS-Protection": "1; mode=block"
+}
+```
 
 ---
 
 ## **Static File Serving**
 
-Static files are served from the `public` directory under the `/static` route. For example:
+Enhanced static file serving features:
 
-- `http://localhost:8000/static/index.html` serves `./public/index.html`.
-- `http://localhost:8000/static/styles.css` serves `./public/styles.css`.
+- Path traversal protection
+- Cached MIME type mapping
+- Secure file access within public directory
+- Proper error handling for missing files
 
 ---
 
-## **Graceful Shutdown**
+## **Advanced Features**
 
-The server handles `SIGINT` and `SIGTERM` signals for graceful shutdown. Press `Ctrl+C` to stop the server.
+### **Request Tracking**
+
+```typescript
+const requestTracker = createRequestTracker();
+// Tracks in-flight requests for graceful shutdown
+yield* requestTracker.track(requestPromise);
+```
+
+### **Graceful Shutdown**
+
+The server now implements comprehensive shutdown handling:
+
+1. Captures SIGINT and SIGTERM signals
+2. Stops accepting new connections
+3. Waits for in-flight requests to complete (with timeout)
+4. Cleans up resources using Effection context
+5. Logs shutdown progress
+
+### **Structured Logging**
+
+Example log output:
+
+```json
+{
+  "requestId": "uuid",
+  "method": "GET",
+  "url": "/path",
+  "status": 200,
+  "duration": 123,
+  "timestamp": "2024-12-30T12:00:00.000Z"
+}
+```
+
+---
+
+## **Error Handling**
+
+- Development mode: Detailed error messages
+- Production mode: Generic error responses
+- Proper error propagation through Effection context
+- Comprehensive error logging
 
 ---
 
 ## **Example Requests**
 
-- **Homepage**:
+Same as before, plus:
+
+- **Dynamic User Route**:
 
   ```bash
-  curl http://localhost:8000/
-  ```
-
-- **About Page**:
-
-  ```bash
-  curl http://localhost:8000/about
-  ```
-
-- **Static File**:
-
-  ```bash
-  curl http://localhost:8000/static/index.html
-  ```
-
-- **Custom 404 Page**:
-
-  ```bash
-  curl http://localhost:8000/nonexistent
+  curl http://localhost:8000/users/123
   ```
 
 ---
 
 ## **Next Steps**
 
-1. **Streaming**:
-   - Implement streaming for large files using `Deno.open`.
+1. **Additional Middleware**:
+   - Request body parsing
+   - CORS support
+   - Rate limiting
 
 2. **Testing**:
-   - Write unit tests for the server using Deno's built-in testing framework.
+   - Unit tests with Deno's testing framework
+   - Integration tests with request tracking
 
-3. **Configuration**:
-   - Use environment variables or a configuration file to customize the server's behavior.
+3. **Monitoring**:
+   - Metrics collection
+   - Health check endpoints
 
 ---
 
@@ -187,10 +247,10 @@ This project is licensed under the MIT License. See the [LICENSE](LICENSE) file 
 
 ## **Acknowledgments**
 
-- Built by DeepSeek & Cloude Sonet.
-- Uses [Deno](https://deno.land/) and [Effection](https://frontside.com/effection/).
-- Built with [Deno](https://deno.land/) and [Effection](https://frontside.com/effection/).
-- Inspired by functional programming principles.
+- Built by DeepSeek & Cloude Sonet gently directed by yours truly.
+- Built with [Deno](https://deno.land/) and [Effection](https://frontside.com/effection/)
+- Inspired by functional programming principles and robust design patterns
 
 ---
  🚀
+
