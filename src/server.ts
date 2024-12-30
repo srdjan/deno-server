@@ -20,14 +20,16 @@ const loggingMiddleware = (handler: RequestHandler): RequestHandler => async (re
 // Middleware for adding security headers
 const securityHeadersMiddleware = (handler: RequestHandler): RequestHandler => async (req) => {
   const res = await handler(req);
-  res.headers.set("Content-Security-Policy", "default-src 'self'");
-  res.headers.set("X-Content-Type-Options", "nosniff");
-  res.headers.set("X-Frame-Options", "DENY");
-  res.headers.set("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
-  res.headers.set("X-XSS-Protection", "1; mode=block");
-  return res;
+  const newRes = new Response(res.body, res);
+  newRes.headers.set("Content-Security-Policy", "default-src 'self'");
+  newRes.headers.set("X-Content-Type-Options", "nosniff");
+  newRes.headers.set("X-Frame-Options", "DENY");
+  newRes.headers.set("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
+  newRes.headers.set("X-XSS-Protection", "1; mode=block");
+  return newRes;
 };
 
+// Serve static files securely
 export const serveStatic = async (filePath: string): Promise<Response> => {
   try {
     const file = await Deno.readFile(filePath);
@@ -35,8 +37,12 @@ export const serveStatic = async (filePath: string): Promise<Response> => {
     return new Response(file, {
       headers: { "Content-Type": contentType },
     });
-  } catch {
-    return new Response("Not Found", { status: 404 });
+  } catch (error) {
+    if (error instanceof Deno.errors.NotFound) {
+      return new Response("Not Found", { status: 404 });
+    }
+    console.error("Error serving static file:", error);
+    return new Response("Internal Server Error", { status: 500 });
   }
 };
 
@@ -74,7 +80,7 @@ const handleRequest: RequestHandler = async (req) => {
 
   // Find a matching route
   const route = routes.find(
-    (r) => path.startsWith(r.path) && r.method === method
+    (r) => path === r.path && r.method === method
   );
 
   if (route) {
@@ -84,18 +90,24 @@ const handleRequest: RequestHandler = async (req) => {
   }
 };
 
+// Compose middleware
+const composeMiddleware = (middlewares: ((handler: RequestHandler) => RequestHandler)[], handler: RequestHandler): RequestHandler => {
+  return middlewares.reduce((acc, middleware) => middleware(acc), handler);
+};
+
 // Start the server using Deno.serve and Effection
 const startServer = async (port: number) => {
-  const handler = securityHeadersMiddleware(loggingMiddleware(handleRequest));
+  const handler = composeMiddleware([loggingMiddleware, securityHeadersMiddleware], handleRequest);
   const server = Deno.serve({ port }, handler);
 
   console.log(`Server is running on http://localhost:${port}`);
 
   // Use Effection's useAbortSignal to handle graceful shutdown
   const abortSignal = useAbortSignal();
-  abortSignal.addEventListener("abort", () => {
-    server.shutdown();
-    console.log("Server has been shut down gracefully.");
+  abortSignal.addEventListener("abort", async () => {
+    console.log("Shutting down gracefully...");
+    await server.shutdown();
+    console.log("Server has been shut down.");
   });
 
   // Wait for the server to close
@@ -116,7 +128,11 @@ main(function* () {
 });
 
 let routes: Route[] = [];
+
 export const start = (appRoutes: Route[]) => {
+  if (!appRoutes || appRoutes.length === 0) {
+    throw new Error("Routes must be provided.");
+  }
   routes = appRoutes;
   main();
-}
+};
