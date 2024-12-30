@@ -1,13 +1,14 @@
-# **Deno Effection HTTP Server with Dynamic Routing and Middleware**
 
-A lightweight, functional-style HTTP server built with **Deno** and **Effection**. This server supports dynamic routing, static file serving, middleware, and structured concurrency.
+# **Deno HTTP Server with Static File Serving and Dynamic Routing**
+
+A lightweight, functional-style HTTP server built with **Deno** and **Effection**. This server supports static file serving, dynamic routing, middleware, and structured concurrency.
 
 ---
 
 ## **Features**
 
-- **Dynamic Routing**: Define routes with `path`, `method`, and `handler`.
 - **Static File Serving**: Serve static files (HTML, CSS, JS, images) from the `public` directory.
+- **Dynamic Routing**: Define routes with `path`, `method`, and `handler`.
 - **Middleware**: Add middleware for logging and security headers.
 - **Structured Concurrency**: Use Effection for managing asynchronous workflows and graceful shutdown.
 - **Graceful Shutdown**: Handle `SIGINT` and `SIGTERM` signals for clean server shutdown.
@@ -35,14 +36,14 @@ A lightweight, functional-style HTTP server built with **Deno** and **Effection*
    mkdir public
    ```
 
-3. Add static files (e.g., `index.html`, `style.css`) to the `public` directory.
+3. Add static files (e.g., `index.html`, `styles.css`) to the `public` directory.
 
 ### **Running the Server**
 
 1. Start the server:
 
    ```bash
-   deno run --allow-net --allow-read server.ts
+   deno run --allow-net --allow-read routes.ts
    ```
 
 2. The server will start on `http://localhost:8000`.
@@ -53,22 +54,27 @@ A lightweight, functional-style HTTP server built with **Deno** and **Effection*
 
 ```
 .
-├── server.ts            # Main server script
-├── deps.ts              # Dependency management
+├── server/              # Server implementation
+│   ├── server.ts        # Main server script
+│   └── deps.ts          # Dependency management
+├── routes.ts            # Application routes
 ├── public/              # Directory for static files
 │   ├── index.html       # Example HTML file
-│   ├── style.css        # Example CSS file
+│   ├── styles.css       # Example CSS file
 │   └── 404.html         # Custom 404 error page
 └── README.md            # This file
 ```
 
 ---
 
-## **Adding Routes**
+## **Defining Routes**
 
-To add a new route, update the `routes` array in `server.ts`:
+The `routes.ts` file defines the routes and starts the server. Here’s an example:
 
 ```typescript
+// routes.ts
+import { Route, serveStatic, start } from "../server/server.ts";
+
 const routes: Route[] = [
   {
     path: "/",
@@ -83,31 +89,25 @@ const routes: Route[] = [
   {
     path: "/static",
     method: "GET",
-    handler: (req) => {
+    handler: async (req) => {
       const url = new URL(req.url);
       const filePath = `./public${url.pathname.substring("/static".length)}`;
-      return serveStatic(filePath);
+      return await serveStatic(filePath);
     },
   },
-  // Add new routes here
-  {
-    path: "/api/data",
-    method: "GET",
-    handler: () => new Response(JSON.stringify({ message: "Hello from the API!" }), {
-      headers: { "Content-Type": "application/json" },
-    }),
-  },
 ];
+
+start(routes);
 ```
 
 ---
 
 ## **Middleware**
 
-Middleware functions can be added to the `handler` in `server.ts`:
+Middleware functions are applied globally in the server implementation (`server.ts`). For example:
 
 ```typescript
-const handler = securityHeadersMiddleware(loggingMiddleware(handleRequest));
+const handler = composeMiddleware([loggingMiddleware, securityHeadersMiddleware], handleRequest);
 ```
 
 ### **Example Middleware**
@@ -121,7 +121,8 @@ const handler = securityHeadersMiddleware(loggingMiddleware(handleRequest));
 
 Static files are served from the `public` directory under the `/static` route. For example:
 
-- `http://localhost:8000/static/style.css` serves `./public/style.css`.
+- `http://localhost:8000/static/index.html` serves `./public/index.html`.
+- `http://localhost:8000/static/styles.css` serves `./public/styles.css`.
 
 ---
 
@@ -148,13 +149,7 @@ The server handles `SIGINT` and `SIGTERM` signals for graceful shutdown. Press `
 - **Static File**:
 
   ```bash
-  curl http://localhost:8000/static/style.css
-  ```
-
-- **API Endpoint**:
-
-  ```bash
-  curl http://localhost:8000/api/data
+  curl http://localhost:8000/static/index.html
   ```
 
 - **Custom 404 Page**:
@@ -171,7 +166,7 @@ The server handles `SIGINT` and `SIGTERM` signals for graceful shutdown. Press `
    - Implement streaming for large files using `Deno.open`.
 
 2. **Testing**:
-   - Write unit tests for the server using Effection's testing utilities.
+   - Write unit tests for the server using Deno's built-in testing framework.
 
 3. **Configuration**:
    - Use environment variables or a configuration file to customize the server's behavior.
