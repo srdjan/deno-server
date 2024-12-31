@@ -13,7 +13,7 @@ import {
   fallback,
   schedule,
   createMiddleware,
-} from "./effectionHigher.ts";
+} from "./higherEffection.ts";
 
 // Types
 type Config = {

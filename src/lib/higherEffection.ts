@@ -1,18 +1,22 @@
-// high-level-api.ts
-import {
-  resource,
-  spawn,
-  suspend,
-  action,
-  shiftSync,
-  Result,
+import type {
   Ok,
   Err,
   Operation,
   Task,
   Frame,
   Scope,
-} from "./run/frame";
+  Result,
+} from "jsr:@effection/effection";
+import {
+  main, ensure, on, once, call, createChannel, useAbortSignal, run,
+  resource,
+  spawn,
+  suspend,
+  action,
+  shiftSync,
+  race,
+  createFrame,
+} from "jsr:@effection/effection";
 import { sleep as lowLevelSleep } from "./sleep";
 import { createSignal } from "./signal";
 import { createQueue } from "./queue";
@@ -29,6 +33,9 @@ import { createContext } from "./context";
  */
 export function createTask<T>(operation: () => Operation<T>): Task<T> {
   const frame = createFrame({ operation });
+  if (!frame) {
+    throw new Error("Failed to create task frame");
+  }
   return frame.getTask();
 }
 
@@ -145,7 +152,10 @@ export function* withConcurrency<T>(
 
   for (const task of tasks) {
     if (activeTasks.size >= maxConcurrency) {
-      yield* race(Array.from(activeTasks));
+      const result = yield* race(Array.from(activeTasks));
+      if (!result) {
+        throw new Error("Concurrency race failed");
+      }
     }
     activeTasks.add(task);
     results.push(yield* task);
@@ -177,8 +187,12 @@ export function* onEvents<T extends EventTarget, K extends string>(
     const signal = createSignal<Event>();
     const listeners = eventNames.map((eventName) => {
       const listener = (event: Event) => {
-        if (!filter || filter(event)) {
-          signal.send(event);
+        try {
+          if (!filter || filter(event)) {
+            signal.send(event);
+          }
+        } catch (error) {
+          console.error("Failed to send event:", error);
         }
       };
       target.addEventListener(eventName, listener);
@@ -223,7 +237,11 @@ export function* schedule(
 
   let iterations = 0;
   while (true) {
-    yield* operation();
+    try {
+      yield* operation();
+    } catch (error) {
+      console.error("Scheduled operation failed:", error);
+    }
     iterations++;
     if (options?.maxIterations && iterations >= options.maxIterations) {
       break;
@@ -244,6 +262,9 @@ export function* schedule(
 export function createMiddleware<T>(
   ...middleware: ((next: T) => T)[]
 ): (handler: T) => T {
+  if (middleware.length === 0) {
+    return (handler) => handler;
+  }
   return (handler) => {
     return middleware.reduceRight((acc, mw) => mw(acc), handler);
   };
