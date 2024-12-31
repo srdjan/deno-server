@@ -1,19 +1,21 @@
 import {
   main,
-  Operation,
   createChannel,
   useAbortSignal,
   call,
-  Stream,
-} from "./deps.ts";
-import { path } from "./deps.ts";
-import {
+  createTask,
+  runTask,
+  cancelTask,
   withResource,
   retry,
   fallback,
+  withConcurrency,
+  onEvents,
   schedule,
-  createMiddleware,
+  sleep,
 } from "./higherEffection.ts";
+import type { Operation, Stream, } from "./higherEffection.ts";
+import { path } from "./deps.ts";
 
 // Types
 type Config = {
@@ -59,7 +61,7 @@ function* createConfig(): Operation<Config> {
       return config;
     },
     function* (config) {
-      return config; // No need for `provide`, just return the value
+      return config;
     }
   );
 }
@@ -83,7 +85,7 @@ function* createMimeTypes(): Operation<Map<string, string>> {
       return types;
     },
     function* (types) {
-      return types; // No need for `provide`, just return the value
+      return types;
     }
   );
 }
@@ -122,7 +124,7 @@ function* createRequestTracker(): Operation<RequestTracker> {
           activeRequests.delete(request);
         }
       }
-      return tracker; // No need for `provide`, just return the value
+      return tracker;
     }
   );
 }
@@ -197,13 +199,13 @@ function* serveStatic(filePath: string, config: Config, mimeTypes: Map<string, s
       });
     },
     function* (response) {
-      return response; // No need for `provide`, just return the value
+      return response;
     }
   );
 }
 
 // Router
-interface Router {
+type Router = {
   matchRoute(path: string, method: string): Route | undefined;
 }
 
@@ -223,7 +225,7 @@ function* createRouter(routes: Route[]): Operation<Router> {
       return router;
     },
     function* (router) {
-      return router; // No need for `provide`, just return the value
+      return router;
     }
   );
 }
@@ -232,20 +234,19 @@ function* createRouter(routes: Route[]): Operation<Router> {
 function* createSignalHandler(): Operation<Stream<string, void>> {
   const channel = createChannel<string>();
 
-  // Define handlers outside of the withResource function
-  const handlers = {
-    SIGINT: () => channel.send("SIGINT"),
-    SIGTERM: () => channel.send("SIGTERM"),
-  };
-
   return yield* withResource(
-    function* (): Operation<Stream<string, void>> {
+    function* () {
+      const handlers = {
+        SIGINT: () => channel.send("SIGINT"),
+        SIGTERM: () => channel.send("SIGTERM"),
+      };
+
       Deno.addSignalListener("SIGINT", handlers.SIGINT);
       Deno.addSignalListener("SIGTERM", handlers.SIGTERM);
 
       return channel;
     },
-    function* (channel: Stream<string, void>): Operation<void> {
+    function* (channel) {
       try {
         const subscription = yield* channel;
         while (true) {
@@ -304,12 +305,28 @@ function* handleRequest(
   );
 }
 
+/**
+ * Creates a middleware chain for composing operations.
+ * @param middleware - An array of middleware functions.
+ * @returns A function that composes the middleware.
+ */
+export function createMiddleware<T>(
+  ...middleware: ((next: T) => T)[]
+): (handler: T) => T {
+  if (middleware.length === 0) {
+    return (handler) => handler;
+  }
+  return (handler) => {
+    return middleware.reduceRight((acc, mw) => mw(acc), handler);
+  };
+}
+
 // Main server creation
 function* createServer(config: Config, routes: Route[]): Operation<void> {
   let server: Deno.HttpServer | undefined;
 
   return yield* withResource(
-    function* (): Operation<void> {
+    function* () {
       const requestTracker = yield* createRequestTracker();
       const mimeTypesMap = yield* createMimeTypes();
       const router = yield* createRouter(routes);
@@ -375,7 +392,7 @@ function* createServer(config: Config, routes: Route[]): Operation<void> {
         console.log("Server has been shut down gracefully.");
       }
     },
-    function* (): Operation<void> {
+    function* () {
       if (server) {
         server.shutdown();
       }

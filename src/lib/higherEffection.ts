@@ -1,26 +1,42 @@
 import type {
-  Ok,
-  Err,
   Operation,
+  Stream,
   Task,
-  Frame,
-  Scope,
-  Result,
 } from "jsr:@effection/effection";
+
 import {
-  main, ensure, on, once, call, createChannel, useAbortSignal, run,
+  main,
+  ensure,
+  on,
+  once,
+  call,
+  createChannel,
+  // useAbortSignal,
+  createSignal,
+  run,
   resource,
   spawn,
   suspend,
   action,
   shiftSync,
   race,
-  createFrame,
+  sleep as lowLevelSleep,
 } from "jsr:@effection/effection";
-import { sleep as lowLevelSleep } from "./sleep";
-import { createSignal } from "./signal";
-import { createQueue } from "./queue";
-import { createContext } from "./context";
+
+// import { sleep as lowLevelSleep } from "./sleep";
+// import { createSignal } from "./signal";
+// import { createQueue } from "./queue";
+// import { createContext } from "./context";
+export {
+  main,
+  createChannel,
+  call,
+};
+export type {
+  Operation,
+  Stream,
+  Task,
+};
 
 // ========================
 // Task Management
@@ -32,11 +48,7 @@ import { createContext } from "./context";
  * @returns A task that can be run or canceled.
  */
 export function createTask<T>(operation: () => Operation<T>): Task<T> {
-  const frame = createFrame({ operation });
-  if (!frame) {
-    throw new Error("Failed to create task frame");
-  }
-  return frame.getTask();
+  return spawn(operation);
 }
 
 /**
@@ -177,7 +189,7 @@ export function* withConcurrency<T>(
  * @param filter - Optional filter function for events.
  * @returns An operation that handles the events.
  */
-export function* onEvents<T extends EventTarget, K extends string>(
+export function onEvents<T extends EventTarget, K extends string>(
   target: T,
   eventNames: K[],
   handler: (event: Event) => Operation<void>,
@@ -251,26 +263,6 @@ export function* schedule(
 }
 
 // ========================
-// Middleware
-// ========================
-
-/**
- * Creates a middleware chain for composing operations.
- * @param middleware - An array of middleware functions.
- * @returns A function that composes the middleware.
- */
-export function createMiddleware<T>(
-  ...middleware: ((next: T) => T)[]
-): (handler: T) => T {
-  if (middleware.length === 0) {
-    return (handler) => handler;
-  }
-  return (handler) => {
-    return middleware.reduceRight((acc, mw) => mw(acc), handler);
-  };
-}
-
-// ========================
 // Utilities
 // ========================
 
@@ -281,4 +273,19 @@ export function createMiddleware<T>(
  */
 export function sleep(duration: number): Operation<void> {
   return lowLevelSleep(duration);
+}
+
+/**
+ * Creates an abort signal bound to the current scope.
+ * @returns An operation that yields an AbortSignal.
+ */
+export function useAbortSignal(): Operation<AbortSignal> {
+  return resource(function* (provide) {
+    const controller = new AbortController();
+    try {
+      yield* provide(controller.signal);
+    } finally {
+      controller.abort();
+    }
+  });
 }
