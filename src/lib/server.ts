@@ -1,13 +1,19 @@
 import {
   main,
   Operation,
-  resource,
   createChannel,
   useAbortSignal,
   call,
   Stream,
 } from "./deps.ts";
 import { path } from "./deps.ts";
+import {
+  withResource,
+  retry,
+  fallback,
+  schedule,
+  createMiddleware,
+} from "./effectionHigher.ts";
 
 // Types
 type Config = {
@@ -33,24 +39,29 @@ interface RequestTracker {
 
 // Config as a resource
 function* createConfig(): Operation<Config> {
-  return yield* resource(function* Config(provide) {
-    const config = {
-      port: parseInt(Deno.env.get("PORT") || "8000"),
-      env: Deno.env.get("DENO_ENV") || "development",
-      publicDir: Deno.env.get("PUBLIC_DIR") || "./public",
-      shutdownTimeout: parseInt(Deno.env.get("SHUTDOWN_TIMEOUT") || "5000"),
-    };
+  return yield* withResource(
+    function* () {
+      const config = {
+        port: parseInt(Deno.env.get("PORT") || "8000"),
+        env: Deno.env.get("DENO_ENV") || "development",
+        publicDir: Deno.env.get("PUBLIC_DIR") || "./public",
+        shutdownTimeout: parseInt(Deno.env.get("SHUTDOWN_TIMEOUT") || "5000"),
+      };
 
-    if (isNaN(config.port) || config.port <= 0) {
-      throw new Error("Invalid port configuration");
+      if (isNaN(config.port) || config.port <= 0) {
+        throw new Error("Invalid port configuration");
+      }
+
+      if (isNaN(config.shutdownTimeout) || config.shutdownTimeout <= 0) {
+        throw new Error("Invalid shutdown timeout configuration");
+      }
+
+      return config;
+    },
+    function* (config) {
+      return config; // No need for `provide`, just return the value
     }
-
-    if (isNaN(config.shutdownTimeout) || config.shutdownTimeout <= 0) {
-      throw new Error("Invalid shutdown timeout configuration");
-    }
-
-    yield* provide(config);
-  });
+  );
 }
 
 // MIME types resource
@@ -67,9 +78,14 @@ function* createMimeTypes(): Operation<Map<string, string>> {
     ["svg", "image/svg+xml"],
   ]);
 
-  return yield* resource(function* MimeTypes(provide) {
-    yield* provide(types);
-  });
+  return yield* withResource(
+    function* () {
+      return types;
+    },
+    function* (types) {
+      return types; // No need for `provide`, just return the value
+    }
+  );
 }
 
 // Request tracking
@@ -77,8 +93,22 @@ function* createRequestTracker(): Operation<RequestTracker> {
   const channel = createChannel<Promise<Response>>();
   const activeRequests = new Set<Promise<Response>>();
 
-  return yield* resource(function* RequestTracker(provide) {
-    const trackingHandler = function* () {
+  return yield* withResource(
+    function* () {
+      const tracker: RequestTracker = {
+        *track(request: Promise<Response>) {
+          yield* channel.send(request);
+        },
+        *waitForCompletion() {
+          if (activeRequests.size > 0) {
+            yield* call(() => Promise.all(Array.from(activeRequests)));
+          }
+        },
+      };
+
+      return tracker;
+    },
+    function* (tracker) {
       const subscription = yield* channel;
       while (true) {
         const result = yield* subscription.next();
@@ -92,26 +122,9 @@ function* createRequestTracker(): Operation<RequestTracker> {
           activeRequests.delete(request);
         }
       }
-    };
-
-    const tracker: RequestTracker = {
-      *track(request: Promise<Response>) {
-        yield* channel.send(request);
-      },
-      *waitForCompletion() {
-        if (activeRequests.size > 0) {
-          yield* call(() => Promise.all(Array.from(activeRequests)));
-        }
-      },
-    };
-
-    try {
-      yield* provide(tracker);
-      yield* trackingHandler();
-    } finally {
-      yield* tracker.waitForCompletion();
+      return tracker; // No need for `provide`, just return the value
     }
-  });
+  );
 }
 
 // Logging middleware
@@ -167,30 +180,26 @@ function processSecurityHeadersMiddleware(handle: RequestHandler): RequestHandle
 
 // Static file serving
 function* serveStatic(filePath: string, config: Config, mimeTypes: Map<string, string>): Operation<Response> {
-  return yield* resource(function* StaticServe(provide) {
-    try {
+  return yield* withResource(
+    function* () {
       const normalizedPath = path.normalize(filePath).replace(/^(\.\.[\/\\])+/, "");
       const fullPath = path.join(config.publicDir, normalizedPath);
 
       if (!fullPath.startsWith(path.resolve(config.publicDir))) {
-        yield* provide(new Response("Forbidden", { status: 403 }));
-        return;
+        return new Response("Forbidden", { status: 403 });
       }
 
       const file = yield* call(() => Deno.readFile(fullPath));
       const contentType = mimeTypes.get(path.extname(fullPath).slice(1)) || "text/plain";
 
-      yield* provide(new Response(file, {
+      return new Response(file, {
         headers: { "Content-Type": contentType },
-      }));
-    } catch (error) {
-      if (error instanceof Deno.errors.NotFound) {
-        yield* provide(new Response("Not Found", { status: 404 }));
-      } else {
-        throw error;
-      }
+      });
+    },
+    function* (response) {
+      return response; // No need for `provide`, just return the value
     }
-  });
+  );
 }
 
 // Router
@@ -199,41 +208,56 @@ interface Router {
 }
 
 function* createRouter(routes: Route[]): Operation<Router> {
-  return yield* resource(function* Router(provide) {
-    const router: Router = {
-      matchRoute(path: string, method: string): Route | undefined {
-        return routes.find((route) => {
-          if (typeof route.path === "string") {
-            return path === route.path && route.method === method;
-          }
-          return route.path.test(path) && route.method === method;
-        });
-      },
-    };
-    yield* provide(router);
-  });
+  return yield* withResource(
+    function* () {
+      const router: Router = {
+        matchRoute(path: string, method: string): Route | undefined {
+          return routes.find((route) => {
+            if (typeof route.path === "string") {
+              return path === route.path && route.method === method;
+            }
+            return route.path.test(path) && route.method === method;
+          });
+        },
+      };
+      return router;
+    },
+    function* (router) {
+      return router; // No need for `provide`, just return the value
+    }
+  );
 }
 
 // Signal handling
 function* createSignalHandler(): Operation<Stream<string, void>> {
   const channel = createChannel<string>();
 
-  return yield* resource(function* SignalHandler(provide) {
-    const handlers = {
-      SIGINT: () => channel.send("SIGINT"),
-      SIGTERM: () => channel.send("SIGTERM"),
-    };
+  // Define handlers outside of the withResource function
+  const handlers = {
+    SIGINT: () => channel.send("SIGINT"),
+    SIGTERM: () => channel.send("SIGTERM"),
+  };
 
-    Deno.addSignalListener("SIGINT", handlers.SIGINT);
-    Deno.addSignalListener("SIGTERM", handlers.SIGTERM);
+  return yield* withResource(
+    function* (): Operation<Stream<string, void>> {
+      Deno.addSignalListener("SIGINT", handlers.SIGINT);
+      Deno.addSignalListener("SIGTERM", handlers.SIGTERM);
 
-    try {
-      yield* provide(channel);
-    } finally {
-      Deno.removeSignalListener("SIGINT", handlers.SIGINT);
-      Deno.removeSignalListener("SIGTERM", handlers.SIGTERM);
+      return channel;
+    },
+    function* (channel: Stream<string, void>): Operation<void> {
+      try {
+        const subscription = yield* channel;
+        while (true) {
+          const result = yield* subscription.next();
+          if (result.done) break;
+        }
+      } finally {
+        Deno.removeSignalListener("SIGINT", handlers.SIGINT);
+        Deno.removeSignalListener("SIGTERM", handlers.SIGTERM);
+      }
     }
-  });
+  );
 }
 
 // Handle individual requests
@@ -243,84 +267,90 @@ function* handleRequest(
   mimeTypesMap: Map<string, string>,
   router: Router,
 ): Operation<Response> {
-  try {
-    const url = new URL(req.url);
-    const path = url.pathname;
-    const method = req.method;
+  return yield* retry(
+    function* () {
+      return yield* fallback(
+        function* () {
+          const url = new URL(req.url);
+          const path = url.pathname;
+          const method = req.method;
 
-    // Try serving static files first
-    const filePath = `${config.publicDir}${path}`;
-    try {
-      const stat = yield* call(() => Deno.stat(filePath));
-      if (stat.isFile) {
-        return yield* serveStatic(path, config, mimeTypesMap);
-      }
-    } catch {
-      // Continue to route matching if file not found
-    }
+          // Try serving static files first
+          const filePath = `${config.publicDir}${path}`;
+          try {
+            const stat = yield* call(() => Deno.stat(filePath));
+            if (stat.isFile) {
+              return yield* serveStatic(path, config, mimeTypesMap);
+            }
+          } catch {
+            // Continue to route matching if file not found
+          }
 
-    // Match routes
-    const route = router.matchRoute(path, method);
-    if (route) {
-      return yield* route.handler(req);
-    }
+          // Match routes
+          const route = router.matchRoute(path, method);
+          if (route) {
+            return yield* route.handler(req);
+          }
 
-    return new Response("Route Not Found", { status: 404 });
-  } catch (error) {
-    console.error("Unhandled error:", error);
-    return new Response(
-      config.env === "development" ? error.message : "Internal Server Error",
-      { status: 500 },
-    );
-  }
+          return new Response("Route Not Found", { status: 404 });
+        },
+        function* () {
+          return new Response("Internal Server Error", { status: 500 });
+        }
+      );
+    },
+    3, // Max retries
+    1000 // Delay between retries
+  );
 }
 
 // Main server creation
 function* createServer(config: Config, routes: Route[]): Operation<void> {
-  return yield* resource(function* Server(provide) {
-    const requestTracker = yield* createRequestTracker();
-    const mimeTypesMap = yield* createMimeTypes();
-    const router = yield* createRouter(routes);
-    const signalHandler = yield* createSignalHandler();
+  let server: Deno.HttpServer | undefined;
 
-    // Create base request handler
-    const baseHandler: RequestHandler = function* (req: Request): Operation<Response> {
-      return yield* handleRequest(req, config, mimeTypesMap, router);
-    };
+  return yield* withResource(
+    function* (): Operation<void> {
+      const requestTracker = yield* createRequestTracker();
+      const mimeTypesMap = yield* createMimeTypes();
+      const router = yield* createRouter(routes);
+      const signalHandler = yield* createSignalHandler();
 
-    // Create the full handler with middleware
-    const finalHandler = processSecurityHeadersMiddleware(
-      processLoggingMiddleware(baseHandler),
-    );
+      // Create base request handler
+      const baseHandler: RequestHandler = function* (req: Request): Operation<Response> {
+        return yield* handleRequest(req, config, mimeTypesMap, router);
+      };
 
-    // Create abort signal for server
-    const signal = yield* useAbortSignal();
+      // Create the full handler with middleware
+      const finalHandler = createMiddleware(
+        processSecurityHeadersMiddleware,
+        processLoggingMiddleware
+      )(baseHandler);
 
-    // Start server
-    const server = Deno.serve({ port: config.port, signal }, async (req) => {
-      const requestOperation = finalHandler(req);
-      const responsePromise = new Promise<Response>((resolve, reject) => {
-        main(function* () {
-          try {
-            const response = yield* requestOperation;
-            resolve(response);
-          } catch (error) {
-            reject(error);
-          }
+      // Create abort signal for server
+      const signal = yield* useAbortSignal();
+
+      // Start server
+      server = Deno.serve({ port: config.port, signal }, async (req) => {
+        const requestOperation = finalHandler(req);
+        const responsePromise = new Promise<Response>((resolve, reject) => {
+          main(function* () {
+            try {
+              const response = yield* requestOperation;
+              resolve(response);
+            } catch (error) {
+              reject(error);
+            }
+          });
         });
+
+        main(function* () {
+          yield* requestTracker.track(responsePromise);
+        });
+
+        return responsePromise;
       });
 
-      main(function* () {
-        yield* requestTracker.track(responsePromise);
-      });
-
-      return responsePromise;
-    });
-
-    console.log(`Server is running on http://localhost:${config.port}`);
-
-    try {
-      yield* provide();
+      console.log(`Server is running on http://localhost:${config.port}`);
 
       // Get subscription from signal handler
       const subscription = yield* signalHandler;
@@ -334,27 +364,23 @@ function* createServer(config: Config, routes: Route[]): Operation<void> {
         server.shutdown();
 
         // Wait for existing requests with timeout
-        const timeoutPromise = new Promise((_, reject) => {
-          setTimeout(() => reject(new Error("Shutdown timeout")), config.shutdownTimeout);
-        });
-
-        try {
-          yield* call(() => Promise.race([
-            timeoutPromise,
-            main(function* () {
-              yield* requestTracker.waitForCompletion();
-            }),
-          ]));
-        } catch (error) {
-          console.warn("Some requests did not complete before timeout");
-        }
+        yield* schedule(
+          config.shutdownTimeout,
+          function* () {
+            console.warn("Some requests did not complete before timeout");
+          },
+          { delay: config.shutdownTimeout }
+        );
 
         console.log("Server has been shut down gracefully.");
       }
-    } finally {
-      server.shutdown();
+    },
+    function* (): Operation<void> {
+      if (server) {
+        server.shutdown();
+      }
     }
-  });
+  );
 }
 
 // Server startup
