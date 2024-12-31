@@ -4,9 +4,8 @@ import {
   resource,
   createChannel,
   useAbortSignal,
-  ensure,
   call,
-  Stream
+  Stream,
 } from "./deps.ts";
 import { path } from "./deps.ts";
 
@@ -57,15 +56,15 @@ function* createConfig(): Operation<Config> {
 // MIME types resource
 function* createMimeTypes(): Operation<Map<string, string>> {
   const types = new Map<string, string>([
-    ['html', 'text/html'],
-    ['css', 'text/css'],
-    ['js', 'application/javascript'],
-    ['json', 'application/json'],
-    ['png', 'image/png'],
-    ['jpg', 'image/jpeg'],
-    ['jpeg', 'image/jpeg'],
-    ['gif', 'image/gif'],
-    ['svg', 'image/svg+xml']
+    ["html", "text/html"],
+    ["css", "text/css"],
+    ["js", "application/javascript"],
+    ["json", "application/json"],
+    ["png", "image/png"],
+    ["jpg", "image/jpeg"],
+    ["jpeg", "image/jpeg"],
+    ["gif", "image/gif"],
+    ["svg", "image/svg+xml"],
   ]);
 
   return yield* resource(function* MimeTypes(provide) {
@@ -79,14 +78,13 @@ function* createRequestTracker(): Operation<RequestTracker> {
   const activeRequests = new Set<Promise<Response>>();
 
   return yield* resource(function* RequestTracker(provide) {
-    // Create the handler function that will process requests
     const trackingHandler = function* () {
-      let subscription = yield* channel;
+      const subscription = yield* channel;
       while (true) {
-        let result = yield* subscription.next();
+        const result = yield* subscription.next();
         if (result.done) break;
 
-        let request = result.value;
+        const request = result.value;
         activeRequests.add(request);
         try {
           yield* call(() => request);
@@ -96,7 +94,6 @@ function* createRequestTracker(): Operation<RequestTracker> {
       }
     };
 
-    // Create the request tracker interface
     const tracker: RequestTracker = {
       *track(request: Promise<Response>) {
         yield* channel.send(request);
@@ -105,10 +102,9 @@ function* createRequestTracker(): Operation<RequestTracker> {
         if (activeRequests.size > 0) {
           yield* call(() => Promise.all(Array.from(activeRequests)));
         }
-      }
+      },
     };
 
-    // Start the tracking handler and provide the tracker interface
     try {
       yield* provide(tracker);
       yield* trackingHandler();
@@ -118,9 +114,9 @@ function* createRequestTracker(): Operation<RequestTracker> {
   });
 }
 
-// Middleware implementations
-function createLoggingMiddleware(handle: RequestHandler): Operation<RequestHandler> {
-  return call(() => function* (req: Request): Operation<Response> {
+// Logging middleware
+function processLoggingMiddleware(handle: RequestHandler): RequestHandler {
+  return function* (req: Request): Operation<Response> {
     const requestId = crypto.randomUUID();
     const start = Date.now();
 
@@ -134,7 +130,7 @@ function createLoggingMiddleware(handle: RequestHandler): Operation<RequestHandl
         url: req.url,
         status: res.status,
         duration,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
       }));
 
       return res;
@@ -143,21 +139,22 @@ function createLoggingMiddleware(handle: RequestHandler): Operation<RequestHandl
         requestId,
         error: error.message,
         stack: error.stack,
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
       }));
       throw error;
     }
-  });
+  };
 }
 
-function createSecurityHeadersMiddleware(handle: RequestHandler): Operation<RequestHandler> {
-  return call(() => function* (req: Request): Operation<Response> {
+// Security headers middleware
+function processSecurityHeadersMiddleware(handle: RequestHandler): RequestHandler {
+  return function* (req: Request): Operation<Response> {
     const res = yield* handle(req);
     const newRes = new Response(res.body, res);
 
     newRes.headers.set(
       "Content-Security-Policy",
-      "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline';"
+      "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline';",
     );
     newRes.headers.set("X-Content-Type-Options", "nosniff");
     newRes.headers.set("X-Frame-Options", "DENY");
@@ -165,14 +162,14 @@ function createSecurityHeadersMiddleware(handle: RequestHandler): Operation<Requ
     newRes.headers.set("X-XSS-Protection", "1; mode=block");
 
     return newRes;
-  });
+  };
 }
 
 // Static file serving
 function* serveStatic(filePath: string, config: Config, mimeTypes: Map<string, string>): Operation<Response> {
   return yield* resource(function* StaticServe(provide) {
     try {
-      const normalizedPath = path.normalize(filePath).replace(/^(\.\.[\/\\])+/, '');
+      const normalizedPath = path.normalize(filePath).replace(/^(\.\.[\/\\])+/, "");
       const fullPath = path.join(config.publicDir, normalizedPath);
 
       if (!fullPath.startsWith(path.resolve(config.publicDir))) {
@@ -181,10 +178,10 @@ function* serveStatic(filePath: string, config: Config, mimeTypes: Map<string, s
       }
 
       const file = yield* call(() => Deno.readFile(fullPath));
-      const contentType = mimeTypes.get(path.extname(fullPath).slice(1)) || 'text/plain';
+      const contentType = mimeTypes.get(path.extname(fullPath).slice(1)) || "text/plain";
 
       yield* provide(new Response(file, {
-        headers: { "Content-Type": contentType }
+        headers: { "Content-Type": contentType },
       }));
     } catch (error) {
       if (error instanceof Deno.errors.NotFound) {
@@ -205,13 +202,13 @@ function* createRouter(routes: Route[]): Operation<Router> {
   return yield* resource(function* Router(provide) {
     const router: Router = {
       matchRoute(path: string, method: string): Route | undefined {
-        return routes.find(route => {
-          if (typeof route.path === 'string') {
+        return routes.find((route) => {
+          if (typeof route.path === "string") {
             return path === route.path && route.method === method;
           }
           return route.path.test(path) && route.method === method;
         });
-      }
+      },
     };
     yield* provide(router);
   });
@@ -223,16 +220,8 @@ function* createSignalHandler(): Operation<Stream<string, void>> {
 
   return yield* resource(function* SignalHandler(provide) {
     const handlers = {
-      SIGINT: () => {
-        main(function* () {
-          yield* channel.send("SIGINT");
-        });
-      },
-      SIGTERM: () => {
-        main(function* () {
-          yield* channel.send("SIGTERM");
-        });
-      }
+      SIGINT: () => channel.send("SIGINT"),
+      SIGTERM: () => channel.send("SIGTERM"),
     };
 
     Deno.addSignalListener("SIGINT", handlers.SIGINT);
@@ -247,6 +236,45 @@ function* createSignalHandler(): Operation<Stream<string, void>> {
   });
 }
 
+// Handle individual requests
+function* handleRequest(
+  req: Request,
+  config: Config,
+  mimeTypesMap: Map<string, string>,
+  router: Router,
+): Operation<Response> {
+  try {
+    const url = new URL(req.url);
+    const path = url.pathname;
+    const method = req.method;
+
+    // Try serving static files first
+    const filePath = `${config.publicDir}${path}`;
+    try {
+      const stat = yield* call(() => Deno.stat(filePath));
+      if (stat.isFile) {
+        return yield* serveStatic(path, config, mimeTypesMap);
+      }
+    } catch {
+      // Continue to route matching if file not found
+    }
+
+    // Match routes
+    const route = router.matchRoute(path, method);
+    if (route) {
+      return yield* route.handler(req);
+    }
+
+    return new Response("Route Not Found", { status: 404 });
+  } catch (error) {
+    console.error("Unhandled error:", error);
+    return new Response(
+      config.env === "development" ? error.message : "Internal Server Error",
+      { status: 500 },
+    );
+  }
+}
+
 // Main server creation
 function* createServer(config: Config, routes: Route[]): Operation<void> {
   return yield* resource(function* Server(provide) {
@@ -257,41 +285,12 @@ function* createServer(config: Config, routes: Route[]): Operation<void> {
 
     // Create base request handler
     const baseHandler: RequestHandler = function* (req: Request): Operation<Response> {
-      try {
-        const url = new URL(req.url);
-        const path = url.pathname;
-        const method = req.method;
-
-        // Try serving static files first
-        const filePath = `${config.publicDir}${path}`;
-        try {
-          const stat = yield* call(() => Deno.stat(filePath));
-          if (stat.isFile) {
-            return yield* serveStatic(path, config, mimeTypesMap);
-          }
-        } catch {
-          // Continue to route matching if file not found
-        }
-
-        // Match routes
-        const route = router.matchRoute(path, method);
-        if (route) {
-          return yield* route.handler(req);
-        }
-
-        return new Response("Route Not Found", { status: 404 });
-      } catch (error) {
-        console.error('Unhandled error:', error);
-        return new Response(
-          config.env === 'development' ? error.message : "Internal Server Error",
-          { status: 500 }
-        );
-      }
+      return yield* handleRequest(req, config, mimeTypesMap, router);
     };
 
     // Create the full handler with middleware
-    const finalHandler = yield* createSecurityHeadersMiddleware(
-      yield* createLoggingMiddleware(baseHandler)
+    const finalHandler = processSecurityHeadersMiddleware(
+      processLoggingMiddleware(baseHandler),
     );
 
     // Create abort signal for server
@@ -324,8 +323,7 @@ function* createServer(config: Config, routes: Route[]): Operation<void> {
       yield* provide();
 
       // Get subscription from signal handler
-      const signalStream = yield* signalHandler;
-      const subscription = yield* signalStream;
+      const subscription = yield* signalHandler;
       const result = yield* subscription.next();
 
       if (!result.done) {
@@ -345,7 +343,7 @@ function* createServer(config: Config, routes: Route[]): Operation<void> {
             timeoutPromise,
             main(function* () {
               yield* requestTracker.waitForCompletion();
-            })
+            }),
           ]));
         } catch (error) {
           console.warn("Some requests did not complete before timeout");
