@@ -5,6 +5,7 @@
     "start": "deno run --allow-net --allow-read ./src/app.ts"
   },
   "imports": {
+    "@effection/effection": "jsr:@effection/effection@^3.1.0",
     "@std/assert": "jsr:@std/assert@1"
   }
 }

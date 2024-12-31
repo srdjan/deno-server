@@ -1,7 +1,5 @@
-import { main, spawn, Operation, createChannel, Stream, Context, useAbortSignal, Task } from "../deps.ts";
-import * as path from "https://deno.land/std/path/mod.ts";
+import { main, Operation, createChannel, Context, useAbortSignal, Stream, Task, path } from "./deps.ts";
 
-// Configuration
 const CONFIG = {
   port: parseInt(Deno.env.get("PORT") || "8000"),
   env: Deno.env.get("DENO_ENV") || "development",
@@ -231,6 +229,10 @@ let routes: Route[] = [];
 
 // Start server with enhanced error handling
 export const start = (appRoutes: Route[]) => {
+  if (routes.length > 0) {
+    throw new Error("Routes already provided.");
+  }
+
   if (!appRoutes || appRoutes.length === 0) {
     throw new Error("Routes must be provided.");
   }
