@@ -294,7 +294,6 @@ function* handleRequest(
       );
     },
     3, // Max retries
-    1000 // Delay between retries
   );
 }
 

@@ -79,18 +79,17 @@ export function useResource<T, R>(
  */
 export function* retry<T>(
   operation: () => Operation<T>,
-  maxRetries: number = 3,
-  delay: number = 1000
+  maxRetries: number = 4
 ): Operation<T> {
+  let delay = 500;
   let lastError: Error | undefined;
   for (let i = 0; i < maxRetries; i++) {
     try {
       return yield* operation();
     } catch (error: any) {
       lastError = error;
-      if (delay) {
-        yield* sleep(delay);
-      }
+      yield* sleep(delay);
+      delay = delay * 2
     }
   }
   throw lastError || new Error("Retry failed");
