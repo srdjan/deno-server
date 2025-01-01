@@ -1,21 +1,16 @@
+import * as path from "jsr:@std/path";
+
 import {
   main,
   createChannel,
   useAbortSignal,
   call,
-  createTask,
-  runTask,
-  cancelTask,
-  withResource,
+  useResource,
   retry,
   fallback,
-  withConcurrency,
-  onEvents,
-  schedule,
-  sleep,
+  useTaskScheduler,
 } from "./higherEffection.ts";
-import type { Operation, Stream, } from "./higherEffection.ts";
-import { path } from "./deps.ts";
+import type { Operation, Stream } from "./higherEffection.ts";
 
 // Types
 type Config = {
@@ -27,7 +22,7 @@ type Config = {
 
 type RequestHandler = (req: Request) => Operation<Response>;
 
-type Route = {
+export type Route = {
   path: string | RegExp;
   method: string;
   handler: RequestHandler;
@@ -41,7 +36,7 @@ interface RequestTracker {
 
 // Config as a resource
 function* createConfig(): Operation<Config> {
-  return yield* withResource(
+  return yield* useResource(
     function* () {
       const config = {
         port: parseInt(Deno.env.get("PORT") || "8000"),
@@ -80,7 +75,7 @@ function* createMimeTypes(): Operation<Map<string, string>> {
     ["svg", "image/svg+xml"],
   ]);
 
-  return yield* withResource(
+  return yield* useResource(
     function* () {
       return types;
     },
@@ -95,7 +90,7 @@ function* createRequestTracker(): Operation<RequestTracker> {
   const channel = createChannel<Promise<Response>>();
   const activeRequests = new Set<Promise<Response>>();
 
-  return yield* withResource(
+  return yield* useResource(
     function* () {
       const tracker: RequestTracker = {
         *track(request: Promise<Response>) {
@@ -182,7 +177,7 @@ function processSecurityHeadersMiddleware(handle: RequestHandler): RequestHandle
 
 // Static file serving
 function* serveStatic(filePath: string, config: Config, mimeTypes: Map<string, string>): Operation<Response> {
-  return yield* withResource(
+  return yield* useResource(
     function* () {
       const normalizedPath = path.normalize(filePath).replace(/^(\.\.[\/\\])+/, "");
       const fullPath = path.join(config.publicDir, normalizedPath);
@@ -210,7 +205,7 @@ type Router = {
 }
 
 function* createRouter(routes: Route[]): Operation<Router> {
-  return yield* withResource(
+  return yield* useResource(
     function* () {
       const router: Router = {
         matchRoute(path: string, method: string): Route | undefined {
@@ -233,17 +228,15 @@ function* createRouter(routes: Route[]): Operation<Router> {
 // Signal handling
 function* createSignalHandler(): Operation<Stream<string, void>> {
   const channel = createChannel<string>();
+  const handlers = {
+    SIGINT: () => channel.send("SIGINT"),
+    SIGTERM: () => channel.send("SIGTERM"),
+  };
 
-  return yield* withResource(
+  return yield* useResource(
     function* () {
-      const handlers = {
-        SIGINT: () => channel.send("SIGINT"),
-        SIGTERM: () => channel.send("SIGTERM"),
-      };
-
       Deno.addSignalListener("SIGINT", handlers.SIGINT);
       Deno.addSignalListener("SIGTERM", handlers.SIGTERM);
-
       return channel;
     },
     function* (channel) {
@@ -321,11 +314,25 @@ export function createMiddleware<T>(
   };
 }
 
+/**
+ * Creates an Operation that returns a Response.
+ * This hides the generator function from the app developer.
+ * @param response - The Response object to return.
+ * @returns An Operation that yields the Response.
+ */
+export function createResponse(response: Response): Operation<Response> {
+  return call(function* () {
+    // Yield a no-op operation to satisfy the linter
+    yield* call(function* () { }); 
+    return response;
+  });
+}
+
 // Main server creation
 function* createServer(config: Config, routes: Route[]): Operation<void> {
   let server: Deno.HttpServer | undefined;
 
-  return yield* withResource(
+  return yield* useResource(
     function* () {
       const requestTracker = yield* createRequestTracker();
       const mimeTypesMap = yield* createMimeTypes();
@@ -381,7 +388,7 @@ function* createServer(config: Config, routes: Route[]): Operation<void> {
         server.shutdown();
 
         // Wait for existing requests with timeout
-        yield* schedule(
+        yield* useTaskScheduler(
           config.shutdownTimeout,
           function* () {
             console.warn("Some requests did not complete before timeout");
@@ -401,7 +408,7 @@ function* createServer(config: Config, routes: Route[]): Operation<void> {
 }
 
 // Server startup
-export function* start(appRoutes: Route[]): Operation<void> {
+function* start(appRoutes: Route[]): Operation<void> {
   if (!appRoutes || appRoutes.length === 0) {
     throw new Error("Routes must be provided.");
   }

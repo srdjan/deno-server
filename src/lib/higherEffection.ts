@@ -1,56 +1,26 @@
 import type {
   Operation,
-  Stream,
   Task,
+  Channel,
+  Stream,
 } from "jsr:@effection/effection";
 
 import {
   main,
-  ensure,
-  on,
-  once,
   call,
-  createChannel,
-  // useAbortSignal,
   createSignal,
-  run,
+  createChannel,
   resource,
-  spawn,
-  suspend,
-  action,
-  shiftSync,
   race,
-  sleep as lowLevelSleep,
+  sleep,
 } from "jsr:@effection/effection";
 
-// import { sleep as lowLevelSleep } from "./sleep";
-// import { createSignal } from "./signal";
-// import { createQueue } from "./queue";
-// import { createContext } from "./context";
-export {
-  main,
-  createChannel,
-  call,
-};
-export type {
-  Operation,
-  Stream,
-  Task,
-};
+export { main, call, createChannel };
+export type { Task, Operation, Stream, Channel };
 
 // ========================
 // Task Management
 // ========================
-
-/**
- * Creates a new task from an operation.
- * @param operation - The operation to run as a task.
- * @returns A task that can be run or canceled.
- */
-export function createTask<T>(operation: () => Operation<T>): Task<T> {
-  return spawn(operation);
-}
-
 /**
  * Runs a task and waits for it to complete.
  * @param task - The task to run.
@@ -72,7 +42,6 @@ export async function cancelTask<T>(task: Task<T>): Promise<void> {
 // ========================
 // Resource Management
 // ========================
-
 /**
  * Ensures resources are properly acquired and released.
  * @param acquire - A function that acquires the resource.
@@ -80,7 +49,7 @@ export async function cancelTask<T>(task: Task<T>): Promise<void> {
  * @param cleanup - Optional cleanup function for the resource.
  * @returns An operation that manages the resource lifecycle.
  */
-export function withResource<T, R>(
+export function useResource<T, R>(
   acquire: () => Operation<T>,
   use: (resource: T) => Operation<R>,
   cleanup?: (resource: T) => Operation<void>
@@ -101,24 +70,23 @@ export function withResource<T, R>(
 // ========================
 // Error Handling
 // ========================
-
 /**
  * Retries an operation a specified number of times with an optional delay.
  * @param operation - The operation to retry.
- * @param maxRetries - The maximum number of retries.
- * @param delay - The delay between retries in milliseconds.
+ * @param maxRetries - The maximum number of retries (default: 3).
+ * @param delay - The delay between retries in milliseconds (default: 1000).
  * @returns An operation that retries the task.
  */
 export function* retry<T>(
   operation: () => Operation<T>,
-  maxRetries: number,
-  delay?: number
+  maxRetries: number = 3,
+  delay: number = 1000
 ): Operation<T> {
   let lastError: Error | undefined;
   for (let i = 0; i < maxRetries; i++) {
     try {
       return yield* operation();
-    } catch (error) {
+    } catch (error: any) {
       lastError = error;
       if (delay) {
         yield* sleep(delay);
@@ -148,7 +116,6 @@ export function* fallback<T>(
 // ========================
 // Concurrency
 // ========================
-
 /**
  * Runs multiple tasks in parallel with a concurrency limit.
  * @param tasks - An array of tasks to run.
@@ -180,7 +147,6 @@ export function* withConcurrency<T>(
 // ========================
 // Event Handling
 // ========================
-
 /**
  * Listens for multiple events on a target with optional filtering.
  * @param target - The event target.
@@ -189,13 +155,21 @@ export function* withConcurrency<T>(
  * @param filter - Optional filter function for events.
  * @returns An operation that handles the events.
  */
-export function onEvents<T extends EventTarget, K extends string>(
+/**
+ * Listens for multiple events on a target with optional filtering.
+ * @param target - The event target.
+ * @param eventNames - The names of the events to listen for.
+ * @param handler - The operation to run when an event occurs.
+ * @param filter - Optional filter function for events.
+ * @returns An operation that handles the events.
+ */
+export function* useEventStream<T extends EventTarget, K extends string>(
   target: T,
   eventNames: K[],
   handler: (event: Event) => Operation<void>,
   filter?: (event: Event) => boolean
 ): Operation<void> {
-  return resource(function* (provide) {
+  return yield* resource(function* (provide) {
     const signal = createSignal<Event>();
     const listeners = eventNames.map((eventName) => {
       const listener = (event: Event) => {
@@ -230,7 +204,6 @@ export function onEvents<T extends EventTarget, K extends string>(
 // ========================
 // Timers
 // ========================
-
 /**
  * Schedules a recurring task with optional delay and max iterations.
  * @param interval - The interval between executions in milliseconds.
@@ -238,7 +211,7 @@ export function onEvents<T extends EventTarget, K extends string>(
  * @param options - Optional configuration for delay and max iterations.
  * @returns An operation that schedules the task.
  */
-export function* schedule(
+export function* useTaskScheduler(
   interval: number,
   operation: () => Operation<void>,
   options?: { delay?: number; maxIterations?: number }
@@ -265,16 +238,6 @@ export function* schedule(
 // ========================
 // Utilities
 // ========================
-
-/**
- * Sleep for a given number of milliseconds.
- * @param duration - The duration in milliseconds.
- * @returns An operation that completes after the duration.
- */
-export function sleep(duration: number): Operation<void> {
-  return lowLevelSleep(duration);
-}
-
 /**
  * Creates an abort signal bound to the current scope.
  * @returns An operation that yields an AbortSignal.
