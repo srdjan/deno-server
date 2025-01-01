@@ -1,14 +1,14 @@
 import * as path from "jsr:@std/path";
-
 import {
   main,
-  createChannel,
-  useAbortSignal,
   call,
+  createChannel,
   useResource,
   retry,
   fallback,
-  useTaskScheduler,
+  useAbortSignal,
+  composeMiddleware,
+  globalErrorHandler,
 } from "./higherEffection.ts";
 import type { Operation, Stream } from "./higherEffection.ts";
 
@@ -87,14 +87,18 @@ function* createMimeTypes(): Operation<Map<string, string>> {
 
 // Request tracking
 function* createRequestTracker(): Operation<RequestTracker> {
-  const channel = createChannel<Promise<Response>>();
   const activeRequests = new Set<Promise<Response>>();
 
   return yield* useResource(
     function* () {
       const tracker: RequestTracker = {
         *track(request: Promise<Response>) {
-          yield* channel.send(request);
+          activeRequests.add(request);
+          try {
+            yield* call(() => request);
+          } finally {
+            activeRequests.delete(request);
+          }
         },
         *waitForCompletion() {
           if (activeRequests.size > 0) {
@@ -102,23 +106,9 @@ function* createRequestTracker(): Operation<RequestTracker> {
           }
         },
       };
-
       return tracker;
     },
     function* (tracker) {
-      const subscription = yield* channel;
-      while (true) {
-        const result = yield* subscription.next();
-        if (result.done) break;
-
-        const request = result.value;
-        activeRequests.add(request);
-        try {
-          yield* call(() => request);
-        } finally {
-          activeRequests.delete(request);
-        }
-      }
       return tracker;
     }
   );
@@ -202,7 +192,7 @@ function* serveStatic(filePath: string, config: Config, mimeTypes: Map<string, s
 // Router
 type Router = {
   matchRoute(path: string, method: string): Route | undefined;
-}
+};
 
 function* createRouter(routes: Route[]): Operation<Router> {
   return yield* useResource(
@@ -225,31 +215,31 @@ function* createRouter(routes: Route[]): Operation<Router> {
   );
 }
 
-// Signal handling
 function* createSignalHandler(): Operation<Stream<string, void>> {
   const channel = createChannel<string>();
-  const handlers = {
-    SIGINT: () => channel.send("SIGINT"),
-    SIGTERM: () => channel.send("SIGTERM"),
-  };
 
   return yield* useResource(
     function* () {
-      Deno.addSignalListener("SIGINT", handlers.SIGINT);
-      Deno.addSignalListener("SIGTERM", handlers.SIGTERM);
-      return channel;
+      // Add signal listeners
+      Deno.addSignalListener("SIGINT", () => channel.send("SIGINT"));
+      Deno.addSignalListener("SIGTERM", () => channel.send("SIGTERM"));
+
+      // Return the channel as a stream
+      return {
+        *[Symbol.iterator]() {
+          const subscription = yield* channel;
+          while (true) {
+            const result = yield* subscription.next();
+            if (result.done) break;
+            yield result.value;
+          }
+        },
+      } as Stream<string, void>; // Explicitly cast to Stream<string, void>
     },
-    function* (channel) {
-      try {
-        const subscription = yield* channel;
-        while (true) {
-          const result = yield* subscription.next();
-          if (result.done) break;
-        }
-      } finally {
-        Deno.removeSignalListener("SIGINT", handlers.SIGINT);
-        Deno.removeSignalListener("SIGTERM", handlers.SIGTERM);
-      }
+    function* () {
+      // Clean up signal listeners
+      Deno.removeSignalListener("SIGINT", () => channel.send("SIGINT"));
+      Deno.removeSignalListener("SIGTERM", () => channel.send("SIGTERM"));
     }
   );
 }
@@ -294,120 +284,47 @@ function* handleRequest(
       );
     },
     3, // Max retries
+    1000 // Delay between retries
   );
-}
-
-/**
- * Creates a middleware chain for composing operations.
- * @param middleware - An array of middleware functions.
- * @returns A function that composes the middleware.
- */
-export function createMiddleware<T>(
-  ...middleware: ((next: T) => T)[]
-): (handler: T) => T {
-  if (middleware.length === 0) {
-    return (handler) => handler;
-  }
-  return (handler) => {
-    return middleware.reduceRight((acc, mw) => mw(acc), handler);
-  };
-}
-
-/**
- * Creates an Operation that returns a Response.
- * This hides the generator function from the app developer.
- * @param response - The Response object to return.
- * @returns An Operation that yields the Response.
- */
-export function createResponse(response: Response): Operation<Response> {
-  return call(function* () {
-    // Yield a no-op operation to satisfy the linter
-    yield* call(function* () { }); 
-    return response;
-  });
 }
 
 // Main server creation
-function* createServer(config: Config, routes: Route[]): Operation<void> {
-  let server: Deno.HttpServer | undefined;
+function* createServer(config: Config, routes: Route[], middleware: RequestHandler[] = []): Operation<void> {
+  const requestTracker = yield* createRequestTracker();
+  const mimeTypesMap = yield* createMimeTypes();
+  const router = yield* createRouter(routes);
+  const signalHandler = yield* createSignalHandler();
 
-  return yield* useResource(
-    function* () {
-      const requestTracker = yield* createRequestTracker();
-      const mimeTypesMap = yield* createMimeTypes();
-      const router = yield* createRouter(routes);
-      const signalHandler = yield* createSignalHandler();
+  const baseHandler: RequestHandler = (req) => handleRequest(req, config, mimeTypesMap, router);
 
-      // Create base request handler
-      const baseHandler: RequestHandler = function* (req: Request): Operation<Response> {
-        return yield* handleRequest(req, config, mimeTypesMap, router);
-      };
+  const finalHandler = composeMiddleware(
+    ...middleware,
+    processSecurityHeadersMiddleware,
+    processLoggingMiddleware
+  )(baseHandler);
 
-      // Create the full handler with middleware
-      const finalHandler = createMiddleware(
-        processSecurityHeadersMiddleware,
-        processLoggingMiddleware
-      )(baseHandler);
+  const signal = yield* useAbortSignal();
 
-      // Create abort signal for server
-      const signal = yield* useAbortSignal();
+  const server = Deno.serve({ port: config.port, signal }, async (req) => {
+    const responsePromise = main(() => finalHandler(req));
+    main(() => requestTracker.track(responsePromise));
+    return responsePromise;
+  });
 
-      // Start server
-      server = Deno.serve({ port: config.port, signal }, async (req) => {
-        const requestOperation = finalHandler(req);
-        const responsePromise = new Promise<Response>((resolve, reject) => {
-          main(function* () {
-            try {
-              const response = yield* requestOperation;
-              resolve(response);
-            } catch (error) {
-              reject(error);
-            }
-          });
-        });
+  console.log(`Server is running on http://localhost:${config.port}`);
 
-        main(function* () {
-          yield* requestTracker.track(responsePromise);
-        });
+  const subscription = yield* signalHandler;
+  const result = yield* subscription.next();
 
-        return responsePromise;
-      });
-
-      console.log(`Server is running on http://localhost:${config.port}`);
-
-      // Get subscription from signal handler
-      const subscription = yield* signalHandler;
-      const result = yield* subscription.next();
-
-      if (!result.done) {
-        console.log(`Received ${result.value} signal`);
-        console.log("Initiating graceful shutdown...");
-
-        // Stop accepting new requests
-        server.shutdown();
-
-        // Wait for existing requests with timeout
-        yield* useTaskScheduler(
-          config.shutdownTimeout,
-          function* () {
-            console.warn("Some requests did not complete before timeout");
-          },
-          { delay: config.shutdownTimeout }
-        );
-
-        console.log("Server has been shut down gracefully.");
-      }
-    },
-    function* () {
-      if (server) {
-        server.shutdown();
-      }
-    }
-  );
+  if (!result.done) {
+    console.log(`Received ${result.value} signal`);
+    server.shutdown();
+    yield* requestTracker.waitForCompletion();
+  }
 }
 
 // Server startup
-function* start(appRoutes: Route[]): Operation<void> {
+function* start(appRoutes: Route[], middleware: RequestHandler[] = []): Operation<void> {
   if (!appRoutes || appRoutes.length === 0) {
     throw new Error("Routes must be provided.");
   }
@@ -415,16 +332,16 @@ function* start(appRoutes: Route[]): Operation<void> {
   const config = yield* createConfig();
 
   try {
-    yield* createServer(config, appRoutes);
+    yield* createServer(config, appRoutes, middleware);
   } catch (error) {
-    console.error("Fatal server error:", error);
+    yield* globalErrorHandler(error);
     throw error;
   }
 }
 
 // Main execution
-export function run(routes: Route[]) {
+export function run(routes: Route[], middleware: RequestHandler[] = []) {
   main(function* () {
-    yield* start(routes);
-  });
+    yield* start(routes, middleware);
+  }
 }

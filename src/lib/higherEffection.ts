@@ -1,19 +1,5 @@
-import type {
-  Operation,
-  Task,
-  Channel,
-  Stream,
-} from "jsr:@effection/effection";
-
-import {
-  main,
-  call,
-  createSignal,
-  createChannel,
-  resource,
-  race,
-  sleep,
-} from "jsr:@effection/effection";
+import type { Operation, Task, Channel, Stream } from "jsr:@effection/effection";
+import { main, call, createChannel, resource, race, sleep } from "jsr:@effection/effection";
 
 export { main, call, createChannel };
 export type { Task, Operation, Stream, Channel };
@@ -79,17 +65,18 @@ export function useResource<T, R>(
  */
 export function* retry<T>(
   operation: () => Operation<T>,
-  maxRetries: number = 4
+  maxRetries: number = 3,
+  delay: number = 1000
 ): Operation<T> {
-  let delay = 500;
   let lastError: Error | undefined;
   for (let i = 0; i < maxRetries; i++) {
     try {
       return yield* operation();
     } catch (error: any) {
       lastError = error;
-      yield* sleep(delay);
-      delay = delay * 2
+      if (delay) {
+        yield* sleep(delay);
+      }
     }
   }
   throw lastError || new Error("Retry failed");
@@ -154,14 +141,6 @@ export function* withConcurrency<T>(
  * @param filter - Optional filter function for events.
  * @returns An operation that handles the events.
  */
-/**
- * Listens for multiple events on a target with optional filtering.
- * @param target - The event target.
- * @param eventNames - The names of the events to listen for.
- * @param handler - The operation to run when an event occurs.
- * @param filter - Optional filter function for events.
- * @returns An operation that handles the events.
- */
 export function* useEventStream<T extends EventTarget, K extends string>(
   target: T,
   eventNames: K[],
@@ -169,7 +148,7 @@ export function* useEventStream<T extends EventTarget, K extends string>(
   filter?: (event: Event) => boolean
 ): Operation<void> {
   return yield* resource(function* (provide) {
-    const signal = createSignal<Event>();
+    const signal = createChannel<Event>();
     const listeners = eventNames.map((eventName) => {
       const listener = (event: Event) => {
         try {
@@ -250,4 +229,34 @@ export function useAbortSignal(): Operation<AbortSignal> {
       controller.abort();
     }
   });
+}
+
+/**
+ * Creates a middleware chain for composing operations.
+ * @param middlewares - An array of middleware functions.
+ * @returns A function that composes the middleware.
+ */
+export function composeMiddleware(...middlewares: RequestHandler[]): RequestHandler {
+  return (req: Request) => {
+    return middlewares.reduceRight((acc, middleware) => middleware(acc), () => createResponse(new Response("", { status: 200 })))();
+  };
+}
+
+/**
+ * Creates an Operation that returns a Response.
+ * @param response - The Response object to return.
+ * @returns An Operation that yields the Response.
+ */
+export function createResponse(response: Response): Operation<Response> {
+  return call(() => response);
+}
+
+/**
+ * Global error handler for robust error management.
+ * @param error - The error to handle.
+ * @returns An operation that handles the error.
+ */
+export function* globalErrorHandler(error: Error): Operation<void> {
+  console.error("Global error handler:", error);
+  // Additional error handling logic
 }
