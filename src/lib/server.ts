@@ -1,347 +1,344 @@
-import * as path from "jsr:@std/path";
 import {
-  main,
-  call,
-  createChannel,
-  useResource,
-  retry,
-  fallback,
-  useAbortSignal,
-  composeMiddleware,
-  globalErrorHandler,
+  Operation,
+  compute,
+  effect,
+  withErrorBoundary,
+  withRetry,
+  withTimeout,
+  type Result
 } from "./higherEffection.ts";
-import type { Operation, Stream } from "./higherEffection.ts";
 
-// Types
-type Config = {
+// Type definitions using readonly to ensure immutability
+type ServerConfig = Readonly<{
   port: number;
   env: string;
   publicDir: string;
   shutdownTimeout: number;
-};
+  maxRequestSize: number;
+  corsOrigins: readonly string[];
+  rateLimits: {
+    readonly windowMs: number;
+    readonly maxRequests: number;
+  };
+  security: {
+    readonly csp: Readonly<Record<string, readonly string[]>>;
+    readonly hstsMaxAge: number;
+  };
+}>;
 
-type RequestHandler = (req: Request) => Operation<Response>;
-
-export type Route = {
+type Route = Readonly<{
   path: string | RegExp;
   method: string;
-  handler: RequestHandler;
-  params?: string[];
+  handler: (req: Request) => Operation<Response>;
+}>;
+
+type RequestContext = Readonly<{
+  id: string;
+  timestamp: number;
+  path: string;
+  method: string;
+  headers: Headers;
+}>;
+
+// Pure functions for configuration handling
+const validateConfig = (config: Partial<ServerConfig>): Result<ServerConfig> => {
+  const requiredFields = ['port', 'env', 'publicDir', 'shutdownTimeout'];
+  const missingFields = requiredFields.filter(field => !(field in config));
+
+  if (missingFields.length > 0) {
+    return {
+      type: 'error',
+      error: new Error(`Missing required fields: ${missingFields.join(', ')}`)
+    };
+  }
+
+  if ((config.port ?? 0) <= 0) {
+    return {
+      type: 'error',
+      error: new Error('Invalid port configuration')
+    };
+  }
+
+  return {
+    type: 'ok',
+    value: config as ServerConfig
+  };
 };
 
-interface RequestTracker {
-  track(request: Promise<Response>): Operation<void>;
-  waitForCompletion(): Operation<void>;
-}
+// Here's the corrected createServer function that properly uses Deno.serve
+const createServer = (config: ServerConfig, routes: readonly Route[]): Operation<void> => ({
+  *[Symbol.iterator]() {
+    // Initialize MIME types as a pure computation
+    const mimeTypes = yield* compute(
+      'initialize-mime-types',
+      () => new Map([
+        ['html', 'text/html'],
+        ['css', 'text/css'],
+        ['js', 'application/javascript'],
+        ['json', 'application/json'],
+        ['png', 'image/png'],
+        ['jpg', 'image/jpeg'],
+        ['gif', 'image/gif'],
+        ['svg', 'image/svg+xml']
+      ])
+    );
 
-// Config as a resource
-function* createConfig(): Operation<Config> {
-  return yield* useResource(
-    function* () {
-      const config = {
+    // Create the abort controller for shutdown handling
+    const controller = yield* compute(
+      'create-abort-controller',
+      () => new AbortController()
+    );
+
+    // Start the server as an effect
+    const server = yield* effect(
+      'start-server',
+      async () => {
+        return Deno.serve({
+          port: config.port,
+          signal: controller.signal,
+          onListen: ({ port }) => {
+            console.log(`Server running on http://localhost:${port}`);
+          },
+          handler: async (req: Request) => {
+            try {
+              // Convert the handler result into a Promise to work with Deno.serve
+              const operation = handleRequest(req, config, routes, mimeTypes);
+              return await operation[Symbol.iterator]().next().value;
+            } catch (error) {
+              console.error('Request handler error:', error);
+              return new Response('Internal Server Error', { status: 500 });
+            }
+          }
+        });
+      }
+    );
+
+    try {
+      // Create and wait for shutdown signal
+      const shutdownSignal = yield* effect(
+        'setup-shutdown-handler',
+        () => new Promise<void>((resolve) => {
+          const signals = ['SIGINT', 'SIGTERM'];
+          const cleanup = () => {
+            signals.forEach(signal => Deno.removeSignalListener(signal, handleSignal));
+            resolve();
+          };
+
+          const handleSignal = () => {
+            console.log('\nShutdown signal received');
+            cleanup();
+          };
+
+          signals.forEach(signal => Deno.addSignalListener(signal, handleSignal));
+        })
+      );
+
+      // Wait for shutdown signal
+      yield* effect(
+        'await-shutdown',
+        () => shutdownSignal
+      );
+
+      // Graceful shutdown
+      yield* compute(
+        'initiate-shutdown',
+        () => {
+          console.log('Starting graceful shutdown...');
+          controller.abort();
+          return server.shutdown();
+        }
+      );
+
+    } catch (err) {
+      yield* compute(
+        'handle-server-error',
+        () => {
+          console.error('Server error:', err);
+          controller.abort();
+        }
+      );
+      throw err;
+    }
+  }
+});
+
+// Request handling with explicit computations and effects
+const handleRequest = (
+  req: Request,
+  config: ServerConfig,
+  routes: readonly Route[],
+  mimeTypes: ReadonlyMap<string, string>
+): Operation<Response> => ({
+  *[Symbol.iterator]() {
+    // Parse request - pure computation
+    const context = yield* compute(
+      'parse-request',
+      () => ({
+        id: crypto.randomUUID(),
+        timestamp: Date.now(),
+        path: new URL(req.url).pathname,
+        method: req.method,
+        headers: req.headers
+      })
+    );
+
+    // Wrap the entire request handling in error boundary
+    return yield* withErrorBoundary(
+      {
+        *[Symbol.iterator]() {
+          // Try static file serving first
+          const staticResponse = yield* handleStaticFile(context.path, config, mimeTypes);
+          if (staticResponse) return staticResponse;
+
+          // Match route - pure computation
+          const route = yield* compute(
+            'match-route',
+            () => routes.find(r =>
+              r.method === context.method &&
+              (typeof r.path === 'string' ? r.path === context.path : r.path.test(context.path))
+            )
+          );
+
+          if (!route) {
+            return new Response('Not Found', { status: 404 });
+          }
+
+          // Handle the route with timeout and retries
+          const response = yield* withTimeout(
+            withRetry(
+              () => route.handler(req),
+              { maxAttempts: 3 }
+            ),
+            config.shutdownTimeout
+          );
+
+          // Add security headers - pure computation
+          return yield* compute(
+            'add-security-headers',
+            () => addSecurityHeaders(response, config)
+          );
+        }
+      },
+      (error) => ({
+        *[Symbol.iterator]() {
+          console.error(`Request ${context.id} failed:`, error);
+        }
+      })
+    );
+  }
+});
+
+// Static file handling with explicit computations and effects
+const handleStaticFile = (
+  path: string,
+  config: ServerConfig,
+  mimeTypes: ReadonlyMap<string, string>
+): Operation<Response | null> => ({
+  *[Symbol.iterator]() {
+    // Path normalization and security check - pure computation
+    const normalizedPath = yield* compute(
+      'normalize-path',
+      () => {
+        const cleanPath = path.normalize(path).replace(/^(\.\.[\/\\])+/, '');
+        const fullPath = path.join(config.publicDir, cleanPath);
+        return { fullPath, isAllowed: fullPath.startsWith(path.resolve(config.publicDir)) };
+      }
+    );
+
+    if (!normalizedPath.isAllowed) {
+      return null;
+    }
+
+    try {
+      // File reading - effect
+      const file = yield* effect(
+        'read-static-file',
+        () => Deno.readFile(normalizedPath.fullPath)
+      );
+
+      // Response creation - pure computation
+      return yield* compute(
+        'create-static-response',
+        () => {
+          const ext = path.extname(normalizedPath.fullPath).slice(1);
+          const contentType = mimeTypes.get(ext) || 'application/octet-stream';
+
+          return new Response(file, {
+            headers: { 'Content-Type': contentType }
+          });
+        }
+      );
+    } catch (err) {
+      if (err instanceof Deno.errors.NotFound) {
+        return null;
+      }
+      throw err;
+    }
+  }
+});
+
+// Security header handling - pure computation
+const addSecurityHeaders = (response: Response, config: ServerConfig): Response => {
+  const newResponse = new Response(response.body, response);
+  const headers = newResponse.headers;
+
+  // Add CSP
+  const cspDirectives = Object.entries(config.security.csp)
+    .map(([key, values]) => `${key} ${values.join(' ')}`)
+    .join('; ');
+  headers.set('Content-Security-Policy', cspDirectives);
+
+  // Add other security headers
+  headers.set('Strict-Transport-Security', `max-age=${config.security.hstsMaxAge}; includeSubDomains`);
+  headers.set('X-Content-Type-Options', 'nosniff');
+  headers.set('X-Frame-Options', 'DENY');
+  headers.set('X-XSS-Protection', '1; mode=block');
+
+  return newResponse;
+};
+
+// Main server startup function
+const startServer = (routes: readonly Route[]): Operation<void> => ({
+  *[Symbol.iterator]() {
+    // Load and validate configuration
+    const config = yield* compute(
+      'load-config',
+      () => ({
         port: parseInt(Deno.env.get("PORT") || "8000"),
         env: Deno.env.get("DENO_ENV") || "development",
         publicDir: Deno.env.get("PUBLIC_DIR") || "./public",
         shutdownTimeout: parseInt(Deno.env.get("SHUTDOWN_TIMEOUT") || "5000"),
-      };
-
-      if (isNaN(config.port) || config.port <= 0) {
-        throw new Error("Invalid port configuration");
-      }
-
-      if (isNaN(config.shutdownTimeout) || config.shutdownTimeout <= 0) {
-        throw new Error("Invalid shutdown timeout configuration");
-      }
-
-      return config;
-    },
-    function* (config) {
-      return config;
-    }
-  );
-}
-
-// MIME types resource
-function* createMimeTypes(): Operation<Map<string, string>> {
-  const types = new Map<string, string>([
-    ["html", "text/html"],
-    ["css", "text/css"],
-    ["js", "application/javascript"],
-    ["json", "application/json"],
-    ["png", "image/png"],
-    ["jpg", "image/jpeg"],
-    ["jpeg", "image/jpeg"],
-    ["gif", "image/gif"],
-    ["svg", "image/svg+xml"],
-  ]);
-
-  return yield* useResource(
-    function* () {
-      return types;
-    },
-    function* (types) {
-      return types;
-    }
-  );
-}
-
-// Request tracking
-function* createRequestTracker(): Operation<RequestTracker> {
-  const activeRequests = new Set<Promise<Response>>();
-
-  return yield* useResource(
-    function* () {
-      const tracker: RequestTracker = {
-        *track(request: Promise<Response>) {
-          activeRequests.add(request);
-          try {
-            yield* call(() => request);
-          } finally {
-            activeRequests.delete(request);
-          }
+        maxRequestSize: parseInt(Deno.env.get("MAX_REQUEST_SIZE") || "1048576"),
+        corsOrigins: Deno.env.get("CORS_ORIGINS")?.split(",") || [],
+        rateLimits: {
+          windowMs: 60000,
+          maxRequests: 100
         },
-        *waitForCompletion() {
-          if (activeRequests.size > 0) {
-            yield* call(() => Promise.all(Array.from(activeRequests)));
-          }
-        },
-      };
-      return tracker;
-    },
-    function* (tracker) {
-      return tracker;
-    }
-  );
-}
-
-// Logging middleware
-function processLoggingMiddleware(handle: RequestHandler): RequestHandler {
-  return function* (req: Request): Operation<Response> {
-    const requestId = crypto.randomUUID();
-    const start = Date.now();
-
-    try {
-      const res = yield* handle(req);
-      const duration = Date.now() - start;
-
-      console.log(JSON.stringify({
-        requestId,
-        method: req.method,
-        url: req.url,
-        status: res.status,
-        duration,
-        timestamp: new Date().toISOString(),
-      }));
-
-      return res;
-    } catch (error) {
-      console.error(JSON.stringify({
-        requestId,
-        error: error.message,
-        stack: error.stack,
-        timestamp: new Date().toISOString(),
-      }));
-      throw error;
-    }
-  };
-}
-
-// Security headers middleware
-function processSecurityHeadersMiddleware(handle: RequestHandler): RequestHandler {
-  return function* (req: Request): Operation<Response> {
-    const res = yield* handle(req);
-    const newRes = new Response(res.body, res);
-
-    newRes.headers.set(
-      "Content-Security-Policy",
-      "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline';",
-    );
-    newRes.headers.set("X-Content-Type-Options", "nosniff");
-    newRes.headers.set("X-Frame-Options", "DENY");
-    newRes.headers.set("Strict-Transport-Security", "max-age=31536000; includeSubDomains");
-    newRes.headers.set("X-XSS-Protection", "1; mode=block");
-
-    return newRes;
-  };
-}
-
-// Static file serving
-function* serveStatic(filePath: string, config: Config, mimeTypes: Map<string, string>): Operation<Response> {
-  return yield* useResource(
-    function* () {
-      const normalizedPath = path.normalize(filePath).replace(/^(\.\.[\/\\])+/, "");
-      const fullPath = path.join(config.publicDir, normalizedPath);
-
-      if (!fullPath.startsWith(path.resolve(config.publicDir))) {
-        return new Response("Forbidden", { status: 403 });
-      }
-
-      const file = yield* call(() => Deno.readFile(fullPath));
-      const contentType = mimeTypes.get(path.extname(fullPath).slice(1)) || "text/plain";
-
-      return new Response(file, {
-        headers: { "Content-Type": contentType },
-      });
-    },
-    function* (response) {
-      return response;
-    }
-  );
-}
-
-// Router
-type Router = {
-  matchRoute(path: string, method: string): Route | undefined;
-};
-
-function* createRouter(routes: Route[]): Operation<Router> {
-  return yield* useResource(
-    function* () {
-      const router: Router = {
-        matchRoute(path: string, method: string): Route | undefined {
-          return routes.find((route) => {
-            if (typeof route.path === "string") {
-              return path === route.path && route.method === method;
-            }
-            return route.path.test(path) && route.method === method;
-          });
-        },
-      };
-      return router;
-    },
-    function* (router) {
-      return router;
-    }
-  );
-}
-
-function* createSignalHandler(): Operation<Stream<string, void>> {
-  const channel = createChannel<string>();
-
-  return yield* useResource(
-    function* () {
-      // Add signal listeners
-      Deno.addSignalListener("SIGINT", () => channel.send("SIGINT"));
-      Deno.addSignalListener("SIGTERM", () => channel.send("SIGTERM"));
-
-      // Return the channel as a stream
-      return {
-        *[Symbol.iterator]() {
-          const subscription = yield* channel;
-          while (true) {
-            const result = yield* subscription.next();
-            if (result.done) break;
-            yield result.value;
-          }
-        },
-      } as Stream<string, void>; // Explicitly cast to Stream<string, void>
-    },
-    function* () {
-      // Clean up signal listeners
-      Deno.removeSignalListener("SIGINT", () => channel.send("SIGINT"));
-      Deno.removeSignalListener("SIGTERM", () => channel.send("SIGTERM"));
-    }
-  );
-}
-
-// Handle individual requests
-function* handleRequest(
-  req: Request,
-  config: Config,
-  mimeTypesMap: Map<string, string>,
-  router: Router,
-): Operation<Response> {
-  return yield* retry(
-    function* () {
-      return yield* fallback(
-        function* () {
-          const url = new URL(req.url);
-          const path = url.pathname;
-          const method = req.method;
-
-          // Try serving static files first
-          const filePath = `${config.publicDir}${path}`;
-          try {
-            const stat = yield* call(() => Deno.stat(filePath));
-            if (stat.isFile) {
-              return yield* serveStatic(path, config, mimeTypesMap);
-            }
-          } catch {
-            // Continue to route matching if file not found
-          }
-
-          // Match routes
-          const route = router.matchRoute(path, method);
-          if (route) {
-            return yield* route.handler(req);
-          }
-
-          return new Response("Route Not Found", { status: 404 });
-        },
-        function* () {
-          return new Response("Internal Server Error", { status: 500 });
+        security: {
+          csp: {
+            'default-src': ["'self'"],
+            'script-src': ["'self'", "'unsafe-inline'"],
+            'style-src': ["'self'", "'unsafe-inline'"]
+          },
+          hstsMaxAge: 31536000
         }
-      );
-    },
-    3, // Max retries
-    1000 // Delay between retries
-  );
-}
+      })
+    );
 
-// Main server creation
-function* createServer(config: Config, routes: Route[], middleware: RequestHandler[] = []): Operation<void> {
-  const requestTracker = yield* createRequestTracker();
-  const mimeTypesMap = yield* createMimeTypes();
-  const router = yield* createRouter(routes);
-  const signalHandler = yield* createSignalHandler();
+    // Validate configuration
+    const validationResult = yield* compute(
+      'validate-config',
+      () => validateConfig(config)
+    );
 
-  const baseHandler: RequestHandler = (req) => handleRequest(req, config, mimeTypesMap, router);
+    if (validationResult.type === 'error') {
+      throw validationResult.error;
+    }
 
-  const finalHandler = composeMiddleware(
-    ...middleware,
-    processSecurityHeadersMiddleware,
-    processLoggingMiddleware
-  )(baseHandler);
-
-  const signal = yield* useAbortSignal();
-
-  const server = Deno.serve({ port: config.port, signal }, async (req) => {
-    const responsePromise = main(() => finalHandler(req));
-    main(() => requestTracker.track(responsePromise));
-    return responsePromise;
-  });
-
-  console.log(`Server is running on http://localhost:${config.port}`);
-
-  const subscription = yield* signalHandler;
-  const result = yield* subscription.next();
-
-  if (!result.done) {
-    console.log(`Received ${result.value} signal`);
-    server.shutdown();
-    yield* requestTracker.waitForCompletion();
+    // Start server with validated configuration
+    yield* createServer(validationResult.value, routes);
   }
-}
+});
 
-// Server startup
-function* start(appRoutes: Route[], middleware: RequestHandler[] = []): Operation<void> {
-  if (!appRoutes || appRoutes.length === 0) {
-    throw new Error("Routes must be provided.");
-  }
-
-  const config = yield* createConfig();
-
-  try {
-    yield* createServer(config, appRoutes, middleware);
-  } catch (error) {
-    yield* globalErrorHandler(error);
-    throw error;
-  }
-}
-
-// Main execution
-export function run(routes: Route[], middleware: RequestHandler[] = []) {
-  main(function* () {
-    yield* start(routes, middleware);
-  }
-}
+export { startServer as run };
+export type { ServerConfig, Route };
