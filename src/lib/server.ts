@@ -296,6 +296,43 @@ const addSecurityHeaders = (response: Response, config: ServerConfig): Response 
 
   return newResponse;
 };
+export type Route = {
+  path: string | RegExp;
+  method: string;
+  handler: (req: Request) => Promise<Response> | Response;
+  middleware?: Middleware[];
+};
+
+export type Middleware = (
+  req: Request,
+  next: (req: Request) => Promise<Response>
+) => Promise<Response>;
+
+export const json = (data: unknown, status = 200): Response =>
+  new Response(JSON.stringify(data), {
+    status,
+    headers: { "Content-Type": "application/json" }
+  });
+
+// Helper to compose middleware with handler
+const applyMiddleware = (
+  handler: (req: Request) => Promise<Response> | Response,
+  middleware: Middleware[] = []
+) => {
+  return async (req: Request): Promise<Response> => {
+    let index = -1;
+
+    const next = async (req: Request): Promise<Response> => {
+      index++;
+      if (index < middleware.length) {
+        return await middleware[index](req, next);
+      }
+      return await Promise.resolve(handler(req));
+    };
+
+    return next(req);
+  };
+};
 
 // Main server startup function
 const startServer = (routes: readonly Route[]): Operation<void> => ({
